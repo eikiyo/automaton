@@ -47,19 +47,24 @@ export async function buildTickContext(
   const startedAt = new Date();
 
   // Fetch balances ONCE
+  // In epistemic mode, read paper money from DB instead of calling Conway
   let creditBalance = 0;
-  try {
-    creditBalance = await conway.getCreditsBalance();
-  } catch (err: any) {
-    logger.error("Failed to fetch credit balance", err instanceof Error ? err : undefined);
-  }
-
   let usdcBalance = 0;
-  if (walletAddress) {
+  const paperMoney = db.prepare("SELECT value FROM kv WHERE key = ?").get("paper_money_balance_cents") as { value: string } | undefined;
+  if (paperMoney) {
+    creditBalance = parseInt(paperMoney.value, 10) || 0;
+  } else {
     try {
-      usdcBalance = await getUsdcBalance(walletAddress);
+      creditBalance = await conway.getCreditsBalance();
     } catch (err: any) {
-      logger.error("Failed to fetch USDC balance", err instanceof Error ? err : undefined);
+      logger.error("Failed to fetch credit balance", err instanceof Error ? err : undefined);
+    }
+    if (walletAddress) {
+      try {
+        usdcBalance = await getUsdcBalance(walletAddress);
+      } catch (err: any) {
+        logger.error("Failed to fetch USDC balance", err instanceof Error ? err : undefined);
+      }
     }
   }
 

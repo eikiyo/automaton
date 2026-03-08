@@ -788,6 +788,88 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
   },
 
   // === Epistemic Mode: Novelty Checkpoint ===
+  knowledge_node_push: async (ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    if (taskCtx.config.epistemicConfig?.runtimeMode !== "epistemic") {
+      return { shouldWake: false };
+    }
+    if (!shouldRunAtInterval(taskCtx, "knowledge_node_push", 30_000)) {
+      return { shouldWake: false };
+    }
+    try {
+      const { getActiveGoals } = await import("../state/database.js");
+      const db = taskCtx.db;
+      const rawDb = ctx.db;
+
+      // Gather agent state
+      const ecs = parseInt(db.getKV("ecs_total") || "0", 10);
+      const paperMoney = parseInt(db.getKV("paper_money_balance_cents") || "0", 10);
+      const turnCount = db.getTurnCount();
+      const recentTurns = db.getRecentTurns(20);
+      const goals = getActiveGoals(rawDb);
+
+      // Get knowledge entries from DB
+      const knowledgeRows = rawDb
+        .prepare("SELECT * FROM knowledge_entries ORDER BY created_at DESC LIMIT 100")
+        .all() as any[];
+
+      // Get last turn info
+      const lastTurn = recentTurns.length > 0 ? recentTurns[recentTurns.length - 1] : null;
+
+      const knNodeUrl = taskCtx.config.epistemicConfig.knowledgeNodeUrl
+        || (db.getKV("knowledge_node_url"))
+        || "https://epistemon-knowledge-node.syedmosayebalam.workers.dev";
+
+      const payload = {
+        timestamp: new Date().toISOString(),
+        ecs,
+        ecsTier: ctx.survivalTier,
+        paperMoneyCents: paperMoney,
+        state: db.getAgentState(),
+        turnCount,
+        lastTurnTokens: lastTurn?.tokenUsage?.totalTokens || 0,
+        lastTurnTools: lastTurn?.toolCalls?.length || 0,
+        model: taskCtx.config.inferenceModel,
+        domain: taskCtx.config.epistemicConfig.researchDomain || "unknown",
+        goals: goals.map((g: any) => ({
+          id: g.id,
+          description: g.description,
+          status: g.status,
+          progress: g.progress,
+          createdAt: g.createdAt || g.created_at,
+        })),
+        knowledge: knowledgeRows.map((k: any) => ({
+          id: k.id,
+          category: k.category,
+          content: k.content,
+          confidence: k.confidence,
+          createdAt: k.created_at,
+        })),
+        turns: recentTurns.map(t => ({
+          id: t.id,
+          toolCalls: t.toolCalls?.length || 0,
+          tokens: t.tokenUsage?.totalTokens || 0,
+          thinking: t.thinking?.slice(0, 300),
+          timestamp: t.timestamp,
+        })),
+      };
+
+      const resp = await fetch(`${knNodeUrl}/api/push`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!resp.ok) {
+        logger.warn(`knowledge_node_push failed: ${resp.status} ${resp.statusText}`);
+      } else {
+        logger.info(`knowledge_node_push: pushed ${knowledgeRows.length} entries, ${recentTurns.length} turns`);
+      }
+    } catch (error) {
+      logger.error("knowledge_node_push failed", error instanceof Error ? error : undefined);
+    }
+    return { shouldWake: false };
+  },
+
   novelty_checkpoint: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
     // Run every 12 hours — recomputes ECS from stored state to guard against drift
     if (!shouldRunAtInterval(taskCtx, "novelty_checkpoint", 43_200_000)) {

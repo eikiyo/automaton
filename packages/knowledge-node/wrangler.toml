@@ -1,0 +1,8 @@
+name = "epistemon-knowledge-node"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[[kv_namespaces]]
+binding = "KN"
+id = "2d1f926c84aa4fd9af9fba83a9b327a7"
+preview_id = "5bff1d1dc2ac488fa3bdd41291ac7c82"

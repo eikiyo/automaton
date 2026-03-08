@@ -164,10 +164,12 @@ export function buildContextMessages(
     }
 
     // The agent's thinking as assistant message
-    if (turn.thinking) {
+    // Filter out empty/whitespace-only thinking to prevent Gemini 400 "must include at least one parts field"
+    const thinkingContent = turn.thinking?.trim();
+    if (thinkingContent || turn.toolCalls.length > 0) {
       const msg: ChatMessage = {
         role: "assistant",
-        content: turn.thinking,
+        content: thinkingContent || "(thinking)",
       };
 
       // If there were tool calls, include them

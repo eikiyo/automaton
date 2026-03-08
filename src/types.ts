@@ -602,6 +602,8 @@ export interface EpistemicConfig {
   bootstrapECS: number;           // initial ECS grant
   ecsDecayFactor: number;         // daily decay multiplier (0.95 = 5%/day)
   mockReviewAcceptRate: number;   // ~0.6
+  knowledgeNodeUrl?: string;      // CF Worker dashboard URL for push
+  submissionGateUrl?: string;     // CF Worker submission gate URL
 }
 
 export const DEFAULT_EPISTEMIC_CONFIG: EpistemicConfig = {
@@ -611,7 +613,7 @@ export const DEFAULT_EPISTEMIC_CONFIG: EpistemicConfig = {
   researchDomain: "any",
   paperMoneyBalanceCents: 10000,  // $100
   submissionFeeCents: 100,        // $1
-  acceptanceRewardCents: 500,     // $5
+  acceptanceRewardCents: 2000,    // $20
   bootstrapECS: 100,
   ecsDecayFactor: 0.95,
   mockReviewAcceptRate: 0.6,

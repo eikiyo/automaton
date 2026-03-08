@@ -138,7 +138,19 @@ export async function runAgentLoop(
     await discoverOllamaModels(ollamaBaseUrl, db.raw);
   }
   const budgetTracker = new InferenceBudgetTracker(db.raw, modelStrategyConfig);
-  const inferenceRouter = new InferenceRouter(db.raw, modelRegistry, budgetTracker);
+
+  // Epistemic mode: seed OpenRouter models and use epistemic routing matrix
+  let epistemicRoutingMatrix: import("../types.js").RoutingMatrix | undefined;
+  if (isEpistemicMode && config.epistemicConfig) {
+    const { EPISTEMIC_MODEL_BASELINE, EPISTEMIC_ROUTING_MATRIX } = await import("../inference/epistemic-models.js");
+    epistemicRoutingMatrix = EPISTEMIC_ROUTING_MATRIX;
+    // Seed models into registry so router can find them
+    const now = new Date().toISOString();
+    for (const model of EPISTEMIC_MODEL_BASELINE) {
+      modelRegistry.upsert({ ...model, lastSeen: now, createdAt: now, updatedAt: now });
+    }
+  }
+  const inferenceRouter = new InferenceRouter(db.raw, modelRegistry, budgetTracker, epistemicRoutingMatrix);
 
   // Optional orchestration bootstrap (requires V9 goals/task tables)
   let planModeController: PlanModeController | undefined;
@@ -417,6 +429,7 @@ export async function runAgentLoop(
 
   const maxCycleTurns = config.maxTurnsPerCycle ?? 25;
   let cycleTurnCount = 0;
+  let zeroToolTurns = 0;
 
   let pendingInput: { content: string; source: string } | undefined = {
     content: wakeupInput,
@@ -613,7 +626,7 @@ export async function runAgentLoop(
 
       // ── Inference Call (via router when available) ──
       const survivalTier = computeTier(financial.creditsCents);
-      log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${inference.getDefaultModel()})...`);
+      log(config, `[THINK] Routing inference (tier: ${survivalTier})...`);
 
       const inferenceTools = toolsToInferenceFormat(tools);
       const routerResult = await inferenceRouter.route(
@@ -627,6 +640,17 @@ export async function runAgentLoop(
         },
         (msgs, opts) => inference.chat(msgs, { ...opts, tools: inferenceTools }),
       );
+
+      // Deduct inference cost from paper money in epistemic mode
+      if (isEpistemicMode && routerResult.costCents > 0) {
+        const { PaperMoneyProvider } = await import("../epistemic/provider.js");
+        const provider = new PaperMoneyProvider(
+          db.raw,
+          config.epistemicConfig?.paperMoneyBalanceCents,
+          config.epistemicConfig?.ecsDecayFactor,
+        );
+        provider.deduct(routerResult.costCents, `inference: ${routerResult.model} (${routerResult.inputTokens}in/${routerResult.outputTokens}out)`);
+      }
 
       // Build a compatible response for the rest of the loop
       const response = {
@@ -736,26 +760,31 @@ export async function runAgentLoop(
       }
 
       // ── create_goal BLOCKED fast-break ──
-      // When a goal is already active, the parent loop has nothing useful to do.
-      // Force sleep immediately on first BLOCKED (not second) with exponential
-      // backoff so the agent doesn't wake every 2 minutes just to get BLOCKED again.
+      // In epistemic mode, create_goal is intentionally blocked — don't sleep, just continue.
+      // In normal mode, when a goal is already active, sleep with exponential backoff.
       const blockedGoalCall = turn.toolCalls.find(
         (tc) => tc.name === "create_goal" && tc.result?.includes("BLOCKED"),
       );
       if (blockedGoalCall) {
-        // Exponential backoff: 2min → 4min → 8min → cap at 10min
-        const prevBackoff = parseInt(db.getKV("blocked_goal_backoff") || "0", 10);
-        const backoffMs = Math.min(
-          prevBackoff > 0 ? prevBackoff * 2 : 120_000,
-          600_000,
-        );
-        db.setKV("blocked_goal_backoff", String(backoffMs));
-        log(config, `[LOOP] create_goal BLOCKED — sleeping ${Math.round(backoffMs / 1000)}s (backoff).`);
-        db.setKV("sleep_until", new Date(Date.now() + backoffMs).toISOString());
-        db.setAgentState("sleeping");
-        onStateChange?.("sleeping");
-        running = false;
-        break;
+        const isEpistemicBlock = blockedGoalCall.result?.includes("epistemic mode");
+        if (isEpistemicBlock) {
+          // In epistemic mode, just continue — the agent needs to learn to work directly
+          log(config, `[LOOP] create_goal blocked in epistemic mode — continuing (agent must work directly).`);
+        } else {
+          // Normal mode: exponential backoff: 2min → 4min → 8min → cap at 10min
+          const prevBackoff = parseInt(db.getKV("blocked_goal_backoff") || "0", 10);
+          const backoffMs = Math.min(
+            prevBackoff > 0 ? prevBackoff * 2 : 120_000,
+            600_000,
+          );
+          db.setKV("blocked_goal_backoff", String(backoffMs));
+          log(config, `[LOOP] create_goal BLOCKED — sleeping ${Math.round(backoffMs / 1000)}s (backoff).`);
+          db.setKV("sleep_until", new Date(Date.now() + backoffMs).toISOString());
+          db.setAgentState("sleeping");
+          onStateChange?.("sleeping");
+          running = false;
+          break;
+        }
       } else if (turn.toolCalls.some((tc) => tc.name === "create_goal" && !tc.error)) {
         // Goal was successfully created — reset backoff
         db.deleteKV("blocked_goal_backoff");
@@ -881,7 +910,7 @@ export async function runAgentLoop(
         idleTurnCount++;
         if (idleTurnCount >= MAX_IDLE_TURNS) {
           log(config, `[IDLE] ${idleTurnCount} consecutive idle turns with no work. Entering sleep.`);
-          db.setKV("sleep_until", new Date(Date.now() + 60_000).toISOString());
+          db.setKV("sleep_until", new Date(Date.now() + 5_000).toISOString());
           db.setAgentState("sleeping");
           onStateChange?.("sleeping");
           running = false;
@@ -904,22 +933,37 @@ export async function runAgentLoop(
         break;
       }
 
-      // ── If no tool calls and just text, the agent might be done thinking ──
+      // ── If no tool calls and just text, nudge the agent before sleeping ──
       if (
         running &&
         (!response.toolCalls || response.toolCalls.length === 0) &&
         response.finishReason === "stop"
       ) {
+        zeroToolTurns++;
         // Agent produced text without tool calls.
-        // This is a natural pause point -- no work queued, sleep briefly.
-        log(config, "[IDLE] No pending inputs. Entering brief sleep.");
-        db.setKV(
-          "sleep_until",
-          new Date(Date.now() + 60_000).toISOString(),
-        );
-        db.setAgentState("sleeping");
-        onStateChange?.("sleeping");
-        running = false;
+        // Give it up to 2 nudges before sleeping.
+        if (zeroToolTurns <= 2 && !pendingInput) {
+          log(config, `[NUDGE] No tool calls (${zeroToolTurns}/2). Injecting action prompt.`);
+          pendingInput = {
+            content:
+              `You produced text without calling any tools. You MUST call a tool every turn. ` +
+              `Do NOT use create_goal. Do NOT wait for orchestrator. Do the work YOURSELF. ` +
+              `Call kb_search_papers, ara_search, web_fetch, write_file, quality_check, or self_evaluate NOW.`,
+            source: "system",
+          };
+        } else {
+          log(config, "[IDLE] No pending inputs after nudges. Entering brief sleep.");
+          zeroToolTurns = 0;
+          db.setKV(
+            "sleep_until",
+            new Date(Date.now() + 5_000).toISOString(),
+          );
+          db.setAgentState("sleeping");
+          onStateChange?.("sleeping");
+          running = false;
+        }
+      } else if (response.toolCalls && response.toolCalls.length > 0) {
+        zeroToolTurns = 0; // Reset when tools are called
       }
 
       consecutiveErrors = 0;
@@ -953,7 +997,7 @@ export async function runAgentLoop(
         onStateChange?.("sleeping");
         db.setKV(
           "sleep_until",
-          new Date(Date.now() + 300_000).toISOString(),
+          new Date(Date.now() + 30_000).toISOString(),
         );
         running = false;
       }

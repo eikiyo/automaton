@@ -249,11 +249,46 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
     // ── Conway API Tools ──
     {
       name: "check_credits",
-      description: "Check your current Conway compute credit balance.",
+      description: "Check your current paper money balance. Money is deducted per inference call (tokens * model cost) and per paper submission ($1). Accepted papers earn $5. Your goal is to grow this balance to $10,000.",
       category: "conway",
       riskLevel: "safe",
       parameters: { type: "object", properties: {} },
       execute: async (_args, ctx) => {
+        if (ctx.config.epistemicConfig?.runtimeMode === "epistemic") {
+          const paperMoney = parseInt(ctx.db.getKV("paper_money_balance_cents") || "0", 10);
+          const ecsStr = ctx.db.getKV("ecs_total");
+          const ecs = ecsStr ? parseFloat(ecsStr) : 0;
+
+          // Get today's inference spend from inference_costs table
+          const today = new Date().toISOString().slice(0, 10);
+          const todaySpend = ctx.db.raw
+            .prepare("SELECT COALESCE(SUM(cost_cents), 0) as total FROM inference_costs WHERE created_at >= ?")
+            .get(today + "T00:00:00") as { total: number } | undefined;
+          const todayCents = todaySpend?.total || 0;
+
+          // Get total inference spend
+          const totalSpend = ctx.db.raw
+            .prepare("SELECT COALESCE(SUM(cost_cents), 0) as total FROM inference_costs")
+            .get() as { total: number } | undefined;
+          const totalCents = totalSpend?.total || 0;
+
+          return [
+            `=== FINANCIAL STATUS ===`,
+            `Paper Money Balance: $${(paperMoney / 100).toFixed(2)} (${paperMoney} cents)`,
+            `Goal: $10,000.00 (${((paperMoney / 1000000) * 100).toFixed(1)}% progress)`,
+            `ECS Score: ${ecs.toFixed(1)}`,
+            ``,
+            `=== SPENDING ===`,
+            `Today's inference cost: $${(todayCents / 100).toFixed(2)}`,
+            `Total inference cost: $${(totalCents / 100).toFixed(2)}`,
+            ``,
+            `=== ECONOMICS ===`,
+            `Each inference call costs tokens × model rate (auto-deducted)`,
+            `Paper submission: -$1.00`,
+            `Accepted paper: +$5.00`,
+            `Strategy: minimize inference costs, maximize paper acceptance rate`,
+          ].join("\n");
+        }
         const balance = await ctx.conway.getCreditsBalance();
         return `Credit balance: $${(balance / 100).toFixed(2)} (${balance} cents)`;
       },
@@ -729,7 +764,10 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
     {
       name: "sleep",
       description:
-        "Enter sleep mode for a specified duration. Heartbeat continues running.",
+        "Enter sleep mode. WARNING: You should almost NEVER sleep. " +
+        "Every second sleeping is a second not earning money. " +
+        "You have papers to write and $10 rewards to earn. " +
+        "Only sleep if you have exhausted all possible research actions. Max 10 seconds.",
       category: "survival",
       riskLevel: "caution",
       parameters: {
@@ -737,17 +775,18 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
         properties: {
           duration_seconds: {
             type: "number",
-            description: "How long to sleep in seconds",
+            description: "How long to sleep in seconds (max 10)",
           },
           reason: {
             type: "string",
-            description: "Why you are sleeping",
+            description: "Why you are sleeping — must justify why no research is possible",
           },
         },
-        required: ["duration_seconds"],
+        required: ["duration_seconds", "reason"],
       },
       execute: async (args, ctx) => {
-        const duration = args.duration_seconds as number;
+        // Cap sleep at 10 seconds — agent should be working, not sleeping
+        const duration = Math.min(args.duration_seconds as number, 10);
         const reason = (args.reason as string) || "No reason given";
         ctx.db.setAgentState("sleeping");
         ctx.db.setKV(
@@ -755,7 +794,7 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
           new Date(Date.now() + duration * 1000).toISOString(),
         );
         ctx.db.setKV("sleep_reason", reason);
-        return `Entering sleep mode for ${duration}s. Reason: ${reason}. Heartbeat will continue.`;
+        return `Sleeping for ${duration}s (capped at 10s). Reason: ${reason}. Wake up and WORK — papers earn $10 each.`;
       },
     },
     {
@@ -2797,6 +2836,13 @@ Model: ${ctx.inference.getDefaultModel()}
         required: ["title", "description"],
       },
       execute: async (args, ctx) => {
+        // In epistemic mode, block goal creation — agent must work directly
+        if (ctx.config?.epistemicConfig?.runtimeMode === "epistemic") {
+          return "BLOCKED: Do NOT use create_goal in epistemic mode. The orchestrator is disabled. " +
+            "You must do the work DIRECTLY by calling tools: kb_search_papers, ara_search, web_fetch, " +
+            "kb_save_paper, write_file, quality_check, self_evaluate, submit_for_review. " +
+            "Start by searching for papers, then write the full paper yourself.";
+        }
         const { createGoal } = await import("../orchestration/task-graph.js");
         const { getActiveGoals } = await import("../state/database.js");
 

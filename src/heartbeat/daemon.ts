@@ -98,6 +98,30 @@ export function createHeartbeatDaemon(
     });
   }
 
+  // Seed epistemic heartbeat tasks if in epistemic mode
+  if (config.epistemicConfig?.runtimeMode === "epistemic") {
+    for (const task of ["ecs_decay", "literature_sweep", "novelty_checkpoint", "knowledge_node_push"]) {
+      upsertHeartbeatSchedule(rawDb, {
+        taskName: task,
+        cronExpression: task === "knowledge_node_push" ? "* * * * *" : "0 * * * *",
+        intervalMs: null,
+        enabled: 1,
+        priority: task === "knowledge_node_push" ? 0 : 5,
+        timeoutMs: 30_000,
+        maxRetries: 1,
+        tierMinimum: "dead",
+        lastRunAt: null,
+        nextRunAt: null,
+        lastResult: null,
+        lastError: null,
+        runCount: 0,
+        failCount: 0,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      });
+    }
+  }
+
   const scheduler = new DurableScheduler(
     rawDb,
     heartbeatConfig,

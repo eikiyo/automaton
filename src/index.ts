@@ -193,7 +193,7 @@ async function run(epistemicFlag = false): Promise<void> {
 
   // Load wallet
   const { account } = await getWallet();
-  const apiKey = config.conwayApiKey || loadApiKeyFromConfig();
+  const apiKey = config.conwayApiKey || loadApiKeyFromConfig() || (isEpistemic ? "epistemic-no-conway" : null);
   if (!apiKey) {
     logger.error("No API key found. Run: automaton --provision");
     process.exit(1);
@@ -246,21 +246,21 @@ async function run(epistemicFlag = false): Promise<void> {
       logger.info(`[${new Date().toISOString()}] Bootstrap ECS grant: ${config.epistemicConfig.bootstrapECS}`);
     }
 
-    // Set Gemini API key for epistemic modules
-    if (config.epistemicConfig.geminiApiKey) {
-      process.env.GEMINI_API_KEY = config.epistemicConfig.geminiApiKey;
-      // Route inference through Gemini's OpenAI-compatible endpoint
-      if (!config.openaiApiKey) {
-        config.openaiApiKey = config.epistemicConfig.geminiApiKey;
-      }
-      process.env.OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
+    // Epistemic inference: use openaiApiKey from config (e.g. OpenRouter)
+    if (config.openaiApiKey) {
+      process.env.GEMINI_API_KEY = config.openaiApiKey;
     }
   }
 
-  // Create Conway client
+  // Set OPENAI_BASE_URL from config if present (e.g. OpenRouter)
+  if ((config as any).openaiBaseUrl && !process.env.OPENAI_BASE_URL) {
+    process.env.OPENAI_BASE_URL = (config as any).openaiBaseUrl;
+  }
+
+  // Create Conway client (epistemic mode uses a placeholder key — Conway calls are skipped)
   const conway = createConwayClient({
     apiUrl: config.conwayApiUrl,
-    apiKey,
+    apiKey: apiKey || "epistemic-no-conway",
     sandboxId: config.sandboxId,
   });
 

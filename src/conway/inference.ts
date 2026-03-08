@@ -183,6 +183,8 @@ function resolveInferenceBackend(
   // Heuristic fallback (model not in registry yet)
   if (keys.anthropicApiKey && /^claude/i.test(model)) return "anthropic";
   if (keys.openaiApiKey && /^(gpt-[3-9]|gpt-4|gpt-5|o[1-9][-\s.]|o[1-9]$|chatgpt|gemini)/i.test(model)) return "openai";
+  // OpenRouter models use org/model format (e.g. google/gemma-3-27b-it, meta-llama/llama-4-scout)
+  if (keys.openaiApiKey && model.includes("/")) return "openai";
   return "conway";
 
 }

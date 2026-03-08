@@ -17,6 +17,7 @@ import type {
   ModelProvider,
   ChatMessage,
   ModelPreference,
+  RoutingMatrix,
 } from "../types.js";
 import { ModelRegistry } from "./registry.js";
 import { InferenceBudgetTracker } from "./budget.js";
@@ -28,11 +29,13 @@ export class InferenceRouter {
   private db: Database;
   private registry: ModelRegistry;
   private budget: InferenceBudgetTracker;
+  private routingMatrix: RoutingMatrix;
 
-  constructor(db: Database, registry: ModelRegistry, budget: InferenceBudgetTracker) {
+  constructor(db: Database, registry: ModelRegistry, budget: InferenceBudgetTracker, routingMatrix?: RoutingMatrix) {
     this.db = db;
     this.registry = registry;
     this.budget = budget;
+    this.routingMatrix = routingMatrix || DEFAULT_ROUTING_MATRIX;
   }
 
   /**
@@ -325,6 +328,6 @@ export class InferenceRouter {
   }
 
   private getPreference(tier: SurvivalTier, taskType: InferenceTaskType): ModelPreference | undefined {
-    return DEFAULT_ROUTING_MATRIX[tier]?.[taskType];
+    return this.routingMatrix[tier]?.[taskType];
   }
 }

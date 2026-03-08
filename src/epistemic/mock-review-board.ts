@@ -2,7 +2,7 @@
  * Location: src/epistemic/mock-review-board.ts
  * Purpose: Mock peer review board — simulates 4 LLM judges with ~60% accept rate
  * Functions: MockReviewBoard.review
- * Calls: PaperMoneyProvider (for $1 fee / $5 reward)
+ * Calls: PaperMoneyProvider (for $1 fee / $10 reward)
  * Imports: provider
  */
 
@@ -35,7 +35,7 @@ export interface ReviewResult {
 
 const JUDGE_NAMES = ["Judge-Alpha", "Judge-Beta", "Judge-Gamma", "Judge-Delta"];
 const SUBMISSION_FEE_CENTS = 100;  // $1
-const ACCEPTANCE_REWARD_CENTS = 500; // $5
+const DEFAULT_ACCEPTANCE_REWARD_CENTS = 1000; // $10
 
 const ACCEPT_REASONS = [
   "Finding presents a novel contribution with adequate supporting evidence.",
@@ -54,17 +54,20 @@ const REJECT_REASONS = [
 
 export class MockReviewBoard {
   private acceptRate: number;
+  private rewardCents: number;
 
   constructor(
     private provider: PaperMoneyProvider,
     acceptRate = 0.6,
+    rewardCents = DEFAULT_ACCEPTANCE_REWARD_CENTS,
   ) {
     this.acceptRate = acceptRate;
+    this.rewardCents = rewardCents;
   }
 
   /**
    * Submit a paper for mock peer review.
-   * Deducts $1 fee. Awards $5 on acceptance.
+   * Deducts $1 fee. Awards $10 on acceptance (configurable).
    */
   review(title: string, content: string): ReviewResult {
     const submissionId = `sub_${Date.now().toString(36)}`;
@@ -112,8 +115,8 @@ export class MockReviewBoard {
 
     let rewardEarned = 0;
     if (accepted) {
-      this.provider.deposit(ACCEPTANCE_REWARD_CENTS, `paper accepted: ${title.slice(0, 50)}`);
-      rewardEarned = ACCEPTANCE_REWARD_CENTS;
+      this.provider.deposit(this.rewardCents, `paper accepted: ${title.slice(0, 50)}`);
+      rewardEarned = this.rewardCents;
     }
 
     const summary = accepted
