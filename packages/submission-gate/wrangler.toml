@@ -1,0 +1,11 @@
+name = "epistemon-submission-gate"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[ai]
+binding = "AI"
+
+[[kv_namespaces]]
+binding = "SUBMISSIONS"
+id = "0443fe43f28f493486856b0665dbbeec"
+preview_id = "d02b3092fe24485fbeea0d2f2689c80a"
