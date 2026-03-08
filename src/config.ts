@@ -130,6 +130,7 @@ export function createConfig(params: {
   ollamaBaseUrl?: string;
   parentAddress?: Address;
   treasuryPolicy?: TreasuryPolicy;
+  epistemicConfig?: EpistemicConfig;
 }): AutomatonConfig {
   return {
     name: params.name,
@@ -156,5 +157,6 @@ export function createConfig(params: {
     maxChildren: DEFAULT_CONFIG.maxChildren || 3,
     parentAddress: params.parentAddress,
     treasuryPolicy: params.treasuryPolicy ?? DEFAULT_TREASURY_POLICY,
+    epistemicConfig: params.epistemicConfig,
   };
 }

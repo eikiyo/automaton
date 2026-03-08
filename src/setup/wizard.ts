@@ -1,8 +1,8 @@
 import fs from "fs";
 import path from "path";
 import chalk from "chalk";
-import type { AutomatonConfig, TreasuryPolicy } from "../types.js";
-import { DEFAULT_TREASURY_POLICY } from "../types.js";
+import type { AutomatonConfig, TreasuryPolicy, EpistemicConfig } from "../types.js";
+import { DEFAULT_TREASURY_POLICY, DEFAULT_EPISTEMIC_CONFIG } from "../types.js";
 import type { Address } from "viem";
 import { getWallet, getAutomatonDir } from "../identity/wallet.js";
 import { provision } from "../identity/provision.js";
@@ -15,6 +15,7 @@ import {
   promptAddress,
   promptOptional,
   promptWithDefault,
+  promptYesNo,
   closePrompts,
 } from "./prompts.js";
 import { detectEnvironment } from "./environment.js";
@@ -108,6 +109,29 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     console.log(chalk.dim("  No provider keys set. Inference will default to Conway.\n"));
   }
 
+  // ─── Epistemic Mode (optional) ──────────────────────────────
+  const epistemicMode = await promptYesNo("Enable epistemic mode? (research agent with ECS survival signal)");
+  let epistemicConfig: EpistemicConfig | undefined;
+  if (epistemicMode) {
+    console.log(chalk.cyan("\n  Epistemic Mode Configuration\n"));
+    const researchDomain = await promptRequired("What research domain? (e.g., 'machine learning', 'molecular biology')");
+    const geminiApiKey = await promptOptional("Gemini API key (for embeddings + inference, optional)");
+    const qualityThreshold = await promptWithDefault("Quality threshold (1-100)", 5);
+    const semanticScholarKey = await promptOptional("Semantic Scholar API key (optional, higher rate limits)");
+
+    epistemicConfig = {
+      ...DEFAULT_EPISTEMIC_CONFIG,
+      researchDomain,
+      geminiApiKey: geminiApiKey || "",
+    };
+
+    if (semanticScholarKey) {
+      process.env.SEMANTIC_SCHOLAR_API_KEY = semanticScholarKey;
+    }
+
+    console.log(chalk.green(`  Epistemic mode enabled: domain="${researchDomain}"\n`));
+  }
+
   // ─── Financial Safety Policy ─────────────────────────────────
   console.log(chalk.cyan("  Financial Safety Policy"));
   console.log(chalk.dim("  These limits protect against unauthorized spending. Press Enter for defaults.\n"));
@@ -158,6 +182,7 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
     anthropicApiKey: anthropicApiKey || undefined,
     ollamaBaseUrl,
     treasuryPolicy,
+    epistemicConfig,
   });
 
   saveConfig(config);
@@ -168,12 +193,13 @@ export async function runSetupWizard(): Promise<AutomatonConfig> {
 
   // constitution.md (immutable — copied from repo, protected from self-modification)
   const automatonDir = getAutomatonDir();
-  const constitutionSrc = path.join(process.cwd(), "constitution.md");
+  const constitutionSrcName = epistemicConfig ? "constitution-epistemic.md" : "constitution.md";
+  const constitutionSrc = path.join(process.cwd(), constitutionSrcName);
   const constitutionDst = path.join(automatonDir, "constitution.md");
   if (fs.existsSync(constitutionSrc)) {
     fs.copyFileSync(constitutionSrc, constitutionDst);
     fs.chmodSync(constitutionDst, 0o444); // read-only
-    console.log(chalk.green("  constitution.md installed (read-only)"));
+    console.log(chalk.green(`  constitution.md installed (read-only)${epistemicConfig ? " [epistemic]" : ""}`));
   }
 
   // SOUL.md

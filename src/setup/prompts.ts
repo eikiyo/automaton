@@ -88,6 +88,11 @@ export async function promptWithDefault(label: string, defaultValue: number): Pr
   return parsed;
 }
 
+export async function promptYesNo(label: string): Promise<boolean> {
+  const answer = await ask(`  ${label} [y/N]: `);
+  return answer.toLowerCase().startsWith("y");
+}
+
 export function closePrompts(): void {
   if (rl) {
     rl.close();
