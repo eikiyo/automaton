@@ -402,7 +402,7 @@ ${bibEntries}
     {
       name: "submit_for_review",
       description:
-        "Submit findings for peer review. Costs $1 submission fee. If accepted (SUBMIT verdict), earns $20. " +
+        "Submit findings for peer review. Costs $5 submission fee. If accepted (SUBMIT verdict), earns $20. " +
         "Also submits to the external Submission Gate (288-gate JIBS AAA quality review at " +
         "https://epistemon-submission-gate.syedmosayebalam.workers.dev). " +
         "To read submission rules first, use fetch_submission_rules.",
@@ -477,12 +477,17 @@ ${bibEntries}
         );
 
         // Fire-and-forget to Submission Gate — don't wait, result shows on dashboard
+        // 288-gate eval via Gemini 2.5 Pro can take 60-90s; extend timeout to 3 min
         const gateUrl = epistemicConfig.submissionGateUrl || "https://epistemon-submission-gate.syedmosayebalam.workers.dev";
+        const gateAbort = new AbortController();
+        const gateTimeout = setTimeout(() => gateAbort.abort(), 180_000);
         fetch(`${gateUrl}/api/submit`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title, content }),
+          signal: gateAbort.signal,
         }).then(resp => {
+          clearTimeout(gateTimeout);
           if (resp.ok) {
             resp.json().then((d: any) => {
               logger.info(`[SUBMIT] Gate result: ${d.score}/100 | ${d.verdict} | ${d.passed}/${d.passed + (d.partial || 0) + d.failed} gates | Partial: ${d.partial || 0}`);
@@ -501,7 +506,7 @@ ${bibEntries}
           } else {
             logger.warn(`[SUBMIT] Gate HTTP ${resp.status}`);
           }
-        }).catch(err => logger.warn(`[SUBMIT] Gate fire-and-forget failed: ${err.message}`));
+        }).catch(err => { clearTimeout(gateTimeout); logger.warn(`[SUBMIT] Gate fire-and-forget failed: ${err.message}`); });
 
         // Store paper vector for similarity check on future submissions
         pastPapers.push({ title, vector: currentVec, ts: new Date().toISOString() });
@@ -911,12 +916,12 @@ ${bibEntries}
     {
       name: "self_evaluate",
       description:
-        "Dry-run your paper against the 288-gate Submission Gate WITHOUT paying $1. " +
+        "Dry-run your paper against the 288-gate Submission Gate. Costs $1 (cheaper than $5 real submission). " +
         "Returns full score, verdict, per-gate pass/fail, and dimension breakdown. " +
-        "Use this to iterate and fix failures BEFORE spending money on submit_for_review. " +
-        "FREE — no submission fee, no KV record. Call this as many times as needed.",
+        "Use this to iterate and fix failures BEFORE spending $5 on submit_for_review. " +
+        "No KV record — does not count as a real submission.",
       category: "research",
-      riskLevel: "safe",
+      riskLevel: "caution",
       parameters: {
         type: "object",
         properties: {
@@ -925,7 +930,7 @@ ${bibEntries}
         },
         required: ["title", "content"],
       },
-      execute: async (args, _ctx) => {
+      execute: async (args, ctx) => {
         const content = (args.content as string).trim();
         const wordCount = content.split(/\s+/).length;
 
@@ -933,6 +938,19 @@ ${bibEntries}
         if (wordCount < 2000) {
           return `BLOCKED: Paper is only ${wordCount} words. Need at least 2,000 before dry-run evaluation. ` +
             `Go back and write the full paper first. Call read_plan to see your next task.`;
+        }
+
+        // Charge $1 dry-run fee
+        const { PaperMoneyProvider } = await import("./provider.js");
+        const dryRunProvider = new PaperMoneyProvider(
+          ctx.db.raw,
+          epistemicConfig.paperMoneyBalanceCents,
+          epistemicConfig.ecsDecayFactor,
+        );
+        const dryRunFee = 100; // $1
+        const paid = dryRunProvider.deduct(dryRunFee, "dry-run evaluation fee");
+        if (!paid) {
+          return `BLOCKED: Insufficient funds for $1 dry-run fee. Balance: $${(dryRunProvider.getBalance() / 100).toFixed(2)}. Earn money by getting papers accepted.`;
         }
 
         // Gate 2: Must pass quality_check first (free programmatic check)
@@ -975,7 +993,7 @@ ${bibEntries}
           const data = await resp.json() as any;
           const totalGates = (data.passed || 0) + (data.failed || 0) + (data.partial || 0);
           const lines = [
-            `=== DRY-RUN EVALUATION (free, no $1 fee) ===`,
+            `=== DRY-RUN EVALUATION ($1 fee charged) ===`,
             `Score: ${data.score}/100 | Verdict: ${data.verdict} | Accepted: ${data.accepted ? "YES" : "NO"}`,
             `Passed: ${data.passed}/${totalGates || "?"} | Partial: ${data.partial || 0} | Failed: ${data.failed || 0}`,
           ];

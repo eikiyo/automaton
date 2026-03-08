@@ -612,7 +612,7 @@ export const DEFAULT_EPISTEMIC_CONFIG: EpistemicConfig = {
   geminiBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
   researchDomain: "any",
   paperMoneyBalanceCents: 10000,  // $100
-  submissionFeeCents: 100,        // $1
+  submissionFeeCents: 500,        // $5
   acceptanceRewardCents: 2000,    // $20
   bootstrapECS: 100,
   ecsDecayFactor: 0.95,

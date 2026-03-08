@@ -2,7 +2,7 @@
  * Location: src/epistemic/mock-review-board.ts
  * Purpose: Mock peer review board — simulates 4 LLM judges with ~60% accept rate
  * Functions: MockReviewBoard.review
- * Calls: PaperMoneyProvider (for $1 fee / $10 reward)
+ * Calls: PaperMoneyProvider (for $5 fee / $20 reward)
  * Imports: provider
  */
 
@@ -34,7 +34,7 @@ export interface ReviewResult {
 }
 
 const JUDGE_NAMES = ["Judge-Alpha", "Judge-Beta", "Judge-Gamma", "Judge-Delta"];
-const SUBMISSION_FEE_CENTS = 100;  // $1
+const SUBMISSION_FEE_CENTS = 500;  // $5
 const DEFAULT_ACCEPTANCE_REWARD_CENTS = 1000; // $10
 
 const ACCEPT_REASONS = [
@@ -67,7 +67,7 @@ export class MockReviewBoard {
 
   /**
    * Submit a paper for mock peer review.
-   * Deducts $1 fee. Awards $10 on acceptance (configurable).
+   * Deducts $5 fee. Awards $20 on acceptance (configurable).
    */
   review(title: string, content: string): ReviewResult {
     const submissionId = `sub_${Date.now().toString(36)}`;
@@ -81,7 +81,7 @@ export class MockReviewBoard {
         submissionId,
         accepted: false,
         verdicts: [],
-        summary: "Submission rejected: insufficient funds for $1 submission fee.",
+        summary: "Submission rejected: insufficient funds for $5 submission fee.",
         feePaid: 0,
         rewardEarned: 0,
       };

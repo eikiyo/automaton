@@ -749,6 +749,38 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
     }
   },
 
+  // === Epistemic Mode: Survival Cost ($0.10/min) ===
+  survival_cost: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    // Runs every tick (60s) — deducts 10 cents per minute regardless of agent state
+    const runtimeMode = taskCtx.config.epistemicConfig?.runtimeMode;
+    if (runtimeMode !== "epistemic") return { shouldWake: false };
+
+    try {
+      const { PaperMoneyProvider } = await import("../epistemic/provider.js");
+      const provider = new PaperMoneyProvider(
+        taskCtx.db.raw,
+        taskCtx.config.epistemicConfig!.paperMoneyBalanceCents,
+        taskCtx.config.epistemicConfig!.ecsDecayFactor,
+      );
+      const SURVIVAL_COST_CENTS = 10; // $0.10 per minute
+      const balance = provider.getBalance();
+      if (balance <= 0) {
+        logger.warn(`survival_cost: balance is $0. Agent is dead.`);
+        return { shouldWake: true, message: "BALANCE IS $0. You are dead. No money left." };
+      }
+      provider.deduct(SURVIVAL_COST_CENTS, "survival cost ($0.10/min)");
+      const newBalance = provider.getBalance();
+      if (newBalance <= 500) { // $5 warning
+        logger.warn(`survival_cost: balance critically low: $${(newBalance / 100).toFixed(2)}`);
+        return { shouldWake: true, message: `CRITICAL: Balance is $${(newBalance / 100).toFixed(2)}. Survival costs $0.10/min. Submit a paper NOW or you will die.` };
+      }
+      return { shouldWake: false };
+    } catch (error) {
+      logger.error("survival_cost failed", error instanceof Error ? error : undefined);
+      return { shouldWake: false };
+    }
+  },
+
   // === Epistemic Mode: Literature Sweep ===
   literature_sweep: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
     // Run every 6 hours

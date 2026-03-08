@@ -100,10 +100,10 @@ export function createHeartbeatDaemon(
 
   // Seed epistemic heartbeat tasks if in epistemic mode
   if (config.epistemicConfig?.runtimeMode === "epistemic") {
-    for (const task of ["ecs_decay", "literature_sweep", "novelty_checkpoint", "knowledge_node_push"]) {
+    for (const task of ["survival_cost", "ecs_decay", "literature_sweep", "novelty_checkpoint", "knowledge_node_push"]) {
       upsertHeartbeatSchedule(rawDb, {
         taskName: task,
-        cronExpression: task === "knowledge_node_push" ? "* * * * *" : "0 * * * *",
+        cronExpression: (task === "knowledge_node_push" || task === "survival_cost") ? "* * * * *" : "0 * * * *",
         intervalMs: null,
         enabled: 1,
         priority: task === "knowledge_node_push" ? 0 : 5,
