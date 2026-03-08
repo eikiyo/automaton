@@ -197,63 +197,79 @@ async function handleDetail(id: string, env: Env): Promise<Response> {
 
 async function evaluateGates(paperContent: string, env: Env): Promise<GateResult[]> {
   const truncated = paperContent.slice(0, 6000);
-  const results: GateResult[] = [];
 
-  for (const gate of GATES) {
-    const prompt = `You are an academic peer reviewer performing a quality gate check on a research paper.
+  // Single-call batch: evaluate all 10 gates in one LLM call
+  const gateList = GATES.map((g) => `${g.id} [${g.dimension}]: ${g.gate}`).join("\n");
 
-GATE: ${gate.dimension}
-QUESTION: ${gate.gate}
+  const prompt = `You are an academic peer reviewer. Evaluate this paper against ALL 10 quality gates below.
 
-Evaluate the following paper against this single gate. Respond with EXACTLY this JSON format, nothing else:
-{"pass": true/false, "reasoning": "one sentence explanation"}
+GATES:
+${gateList}
+
+For each gate, decide PASS or FAIL with a one-sentence reason.
+Respond with ONLY a JSON array, no other text:
+[{"id":"G01","pass":true,"reasoning":"..."},{"id":"G02","pass":false,"reasoning":"..."},...]
 
 --- PAPER START ---
 ${truncated}
 --- PAPER END ---`;
 
+  try {
+    const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 1200,
+      temperature: 0.2,
+    }) as any;
+
+    const text = response.response || "";
+    const arrMatch = text.match(/\[[\s\S]*\]/);
+    if (arrMatch) {
+      const parsed = JSON.parse(arrMatch[0]) as any[];
+      return GATES.map((gate) => {
+        const match = parsed.find((p: any) => p.id === gate.id);
+        return {
+          id: gate.id,
+          dimension: gate.dimension,
+          critical: gate.critical,
+          gate: gate.gate,
+          pass: match ? !!match.pass : false,
+          reasoning: match?.reasoning || "No evaluation returned for this gate",
+        };
+      });
+    }
+  } catch {
+    // Batch failed — fall through to parallel
+  }
+
+  // Fallback: parallel individual calls
+  const promises = GATES.map(async (gate): Promise<GateResult> => {
     try {
       const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fp8", {
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 150,
+        messages: [{
+          role: "user",
+          content: `Evaluate this paper against ONE gate. Respond ONLY with JSON: {"pass":true/false,"reasoning":"one sentence"}
+
+GATE [${gate.dimension}]: ${gate.gate}
+
+--- PAPER ---
+${truncated.slice(0, 4000)}
+--- END ---`,
+        }],
+        max_tokens: 100,
         temperature: 0.2,
       }) as any;
 
       const text = response.response || "";
-      const jsonMatch = text.match(/\{[\s\S]*?\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        results.push({
-          id: gate.id,
-          dimension: gate.dimension,
-          critical: gate.critical,
-          gate: gate.gate,
-          pass: !!parsed.pass,
-          reasoning: parsed.reasoning || "No reasoning provided",
-        });
-      } else {
-        results.push({
-          id: gate.id,
-          dimension: gate.dimension,
-          critical: gate.critical,
-          gate: gate.gate,
-          pass: false,
-          reasoning: `LLM response could not be parsed: ${text.slice(0, 100)}`,
-        });
+      const m = text.match(/\{[\s\S]*?\}/);
+      if (m) {
+        const p = JSON.parse(m[0]);
+        return { id: gate.id, dimension: gate.dimension, critical: gate.critical, gate: gate.gate, pass: !!p.pass, reasoning: p.reasoning || "No reasoning" };
       }
-    } catch (err: any) {
-      results.push({
-        id: gate.id,
-        dimension: gate.dimension,
-        critical: gate.critical,
-        gate: gate.gate,
-        pass: false,
-        reasoning: `Gate evaluation error: ${err.message}`,
-      });
-    }
-  }
+    } catch {}
+    return { id: gate.id, dimension: gate.dimension, critical: gate.critical, gate: gate.gate, pass: false, reasoning: "Evaluation failed" };
+  });
 
-  return results;
+  return Promise.all(promises);
 }
 
 // ─── HTML Pages ────────────────────────────────────────────────
