@@ -10,7 +10,7 @@ import type {
   FinancialState,
   SurvivalTier,
 } from "../types.js";
-import { SURVIVAL_THRESHOLDS } from "../types.js";
+import { SURVIVAL_THRESHOLDS, EPISTEMIC_SURVIVAL_THRESHOLDS } from "../types.js";
 
 /**
  * Check the current financial state of the automaton.
@@ -40,6 +40,17 @@ export function getSurvivalTier(creditsCents: number): SurvivalTier {
   if (creditsCents > SURVIVAL_THRESHOLDS.normal) return "normal";
   if (creditsCents > SURVIVAL_THRESHOLDS.low_compute) return "low_compute";
   if (creditsCents >= 0) return "critical";
+  return "dead";
+}
+
+/**
+ * Determine survival tier in epistemic mode based on ECS score.
+ */
+export function getEpistemicSurvivalTier(ecs: number): SurvivalTier {
+  if (ecs > EPISTEMIC_SURVIVAL_THRESHOLDS.high) return "high";
+  if (ecs > EPISTEMIC_SURVIVAL_THRESHOLDS.normal) return "normal";
+  if (ecs > EPISTEMIC_SURVIVAL_THRESHOLDS.low_compute) return "low_compute";
+  if (ecs >= 0) return "critical";
   return "dead";
 }
 

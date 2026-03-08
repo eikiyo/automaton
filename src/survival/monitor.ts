@@ -13,7 +13,7 @@ import type {
   FinancialState,
   SurvivalTier,
 } from "../types.js";
-import { getSurvivalTier, formatCredits } from "../conway/credits.js";
+import { getSurvivalTier, getEpistemicSurvivalTier, formatCredits } from "../conway/credits.js";
 import { getUsdcBalance } from "../conway/x402.js";
 
 export interface ResourceStatus {
@@ -31,26 +31,36 @@ export async function checkResources(
   identity: AutomatonIdentity,
   conway: ConwayClient,
   db: AutomatonDatabase,
+  epistemicMode = false,
 ): Promise<ResourceStatus> {
-  // Check credits
   let creditsCents = 0;
-  try {
-    creditsCents = await conway.getCreditsBalance();
-  } catch {}
-
-  // Check USDC
   let usdcBalance = 0;
-  try {
-    usdcBalance = await getUsdcBalance(identity.address);
-  } catch {}
-
-  // Check sandbox health
   let sandboxHealthy = true;
-  try {
-    const result = await conway.exec("echo ok", 5000);
-    sandboxHealthy = result.exitCode === 0;
-  } catch {
-    sandboxHealthy = false;
+
+  if (epistemicMode) {
+    // In epistemic mode, "credits" = paper money balance from KV store
+    const balStr = db.getKV("paper_money_balance_cents");
+    creditsCents = balStr ? parseInt(balStr, 10) : 0;
+    // No real USDC or sandbox checks needed
+    usdcBalance = 0;
+  } else {
+    // Check credits
+    try {
+      creditsCents = await conway.getCreditsBalance();
+    } catch {}
+
+    // Check USDC
+    try {
+      usdcBalance = await getUsdcBalance(identity.address);
+    } catch {}
+
+    // Check sandbox health
+    try {
+      const result = await conway.exec("echo ok", 5000);
+      sandboxHealthy = result.exitCode === 0;
+    } catch {
+      sandboxHealthy = false;
+    }
   }
 
   const financial: FinancialState = {
@@ -59,7 +69,16 @@ export async function checkResources(
     lastChecked: new Date().toISOString(),
   };
 
-  const tier = getSurvivalTier(creditsCents);
+  // In epistemic mode, use ECS for tier; in conway mode, use credits
+  let tier: SurvivalTier;
+  if (epistemicMode) {
+    const ecsStr = db.getKV("ecs_total");
+    const ecs = ecsStr ? parseFloat(ecsStr) : 0;
+    tier = getEpistemicSurvivalTier(ecs);
+  } else {
+    tier = getSurvivalTier(creditsCents);
+  }
+
   const prevTierStr = db.getKV("current_tier");
   const previousTier = (prevTierStr as SurvivalTier) || null;
   const tierChanged = previousTier !== null && previousTier !== tier;

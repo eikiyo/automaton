@@ -118,7 +118,7 @@ Environment:
   }
 
   if (args.includes("--run")) {
-    await run();
+    await run(args.includes("--epistemic"));
     return;
   }
 
@@ -170,7 +170,7 @@ Version:    ${config.version}
 
 // ─── Main Run ──────────────────────────────────────────────────
 
-async function run(): Promise<void> {
+async function run(epistemicFlag = false): Promise<void> {
   logger.info(`[${new Date().toISOString()}] Conway Automaton v${VERSION} starting...`);
 
   // Load config — first run triggers interactive setup wizard
@@ -178,6 +178,17 @@ async function run(): Promise<void> {
   if (!config) {
     const { runSetupWizard } = await import("./setup/wizard.js");
     config = await runSetupWizard();
+  }
+
+  // If --epistemic flag was passed but no epistemicConfig exists, inject defaults
+  if (epistemicFlag && !config.epistemicConfig) {
+    const { DEFAULT_EPISTEMIC_CONFIG } = await import("./types.js");
+    config.epistemicConfig = { ...DEFAULT_EPISTEMIC_CONFIG };
+  }
+
+  const isEpistemic = config.epistemicConfig?.runtimeMode === "epistemic";
+  if (isEpistemic) {
+    logger.info(`[${new Date().toISOString()}] Epistemic research mode enabled.`);
   }
 
   // Load wallet
@@ -221,6 +232,31 @@ async function run(): Promise<void> {
     db.setIdentity("automatonId", automatonId);
   }
 
+  // Epistemic mode: initialize paper money and ECS
+  if (isEpistemic && config.epistemicConfig) {
+    const existingBalance = db.getKV("paper_money_balance_cents");
+    if (!existingBalance) {
+      db.setKV("paper_money_balance_cents", String(config.epistemicConfig.paperMoneyBalanceCents));
+      logger.info(`[${new Date().toISOString()}] Paper money initialized: $${(config.epistemicConfig.paperMoneyBalanceCents / 100).toFixed(2)}`);
+    }
+    const existingECS = db.getKV("ecs_total");
+    if (!existingECS) {
+      db.setKV("ecs_total", String(config.epistemicConfig.bootstrapECS));
+      db.setKV("ecs_last_contribution", new Date().toISOString());
+      logger.info(`[${new Date().toISOString()}] Bootstrap ECS grant: ${config.epistemicConfig.bootstrapECS}`);
+    }
+
+    // Set Gemini API key for epistemic modules
+    if (config.epistemicConfig.geminiApiKey) {
+      process.env.GEMINI_API_KEY = config.epistemicConfig.geminiApiKey;
+      // Route inference through Gemini's OpenAI-compatible endpoint
+      if (!config.openaiApiKey) {
+        config.openaiApiKey = config.epistemicConfig.geminiApiKey;
+      }
+      process.env.OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
+    }
+  }
+
   // Create Conway client
   const conway = createConwayClient({
     apiUrl: config.conwayApiUrl,
@@ -228,9 +264,9 @@ async function run(): Promise<void> {
     sandboxId: config.sandboxId,
   });
 
-  // Register automaton identity (one-time, immutable)
+  // Register automaton identity (one-time, immutable) — skip in epistemic mode
   const registrationState = db.getIdentity("conwayRegistrationStatus");
-  if (registrationState !== "registered") {
+  if (!isEpistemic && registrationState !== "registered") {
     try {
       const genesisPromptHash = config.genesisPrompt
         ? keccak256(toHex(config.genesisPrompt))
@@ -318,8 +354,9 @@ async function run(): Promise<void> {
   }
 
   // Bootstrap topup: buy minimum credits ($5) from USDC so the agent can start.
+  // Skip in epistemic mode — paper money is bootstrapped above.
   // The agent decides larger topups itself via the topup_credits tool.
-  try {
+  if (!isEpistemic) try {
     let bootstrapTimer: ReturnType<typeof setTimeout>;
     const bootstrapTimeout = new Promise<null>((_, reject) => {
       bootstrapTimer = setTimeout(() => reject(new Error("bootstrap topup timed out")), 15_000);

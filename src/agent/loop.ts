@@ -35,7 +35,7 @@ import {
   executeTool,
 } from "./tools.js";
 import { sanitizeInput } from "./injection-defense.js";
-import { getSurvivalTier } from "../conway/credits.js";
+import { getSurvivalTier, getEpistemicSurvivalTier } from "../conway/credits.js";
 import { getUsdcBalance } from "../conway/x402.js";
 import {
   claimInboxMessages,
@@ -96,6 +96,16 @@ export async function runAgentLoop(
 ): Promise<void> {
   const { identity, config, db, conway, inference, social, skills, policyEngine, spendTracker, onStateChange, onTurnComplete, ollamaBaseUrl } =
     options;
+
+  const isEpistemicMode = config.epistemicConfig?.runtimeMode === "epistemic";
+  const computeTier = (creditsCents: number) => {
+    if (isEpistemicMode) {
+      const ecsStr = db.getKV("ecs_total");
+      const ecs = ecsStr ? parseFloat(ecsStr) : 0;
+      return getEpistemicSurvivalTier(ecs);
+    }
+    return getSurvivalTier(creditsCents);
+  };
 
   const builtinTools = createBuiltinTools(identity.sandboxId);
   const installedTools = loadInstalledTools(db);
@@ -376,7 +386,7 @@ export async function runAgentLoop(
   onStateChange?.("waking");
 
   // Get financial state
-  let financial = await getFinancialState(conway, identity.address, db);
+  let financial = await getFinancialState(conway, identity.address, db, config.epistemicConfig?.runtimeMode === "epistemic");
 
   // Check if this is the first run
   const isFirstRun = db.getTurnCount() === 0;
@@ -444,7 +454,7 @@ export async function runAgentLoop(
       }
 
       // Refresh financial state periodically
-      financial = await getFinancialState(conway, identity.address, db);
+      financial = await getFinancialState(conway, identity.address, db, config.epistemicConfig?.runtimeMode === "epistemic");
 
       // Check survival tier
       // api_unreachable: creditsCents === -1 means API failed with no cache.
@@ -453,7 +463,7 @@ export async function runAgentLoop(
         log(config, "[API_UNREACHABLE] Balance API unreachable, continuing in low-compute mode.");
         inference.setLowComputeMode(true);
       } else {
-        const tier = getSurvivalTier(financial.creditsCents);
+        const tier = computeTier(financial.creditsCents);
 
         // Inline auto-topup: if credits are critically low and USDC is
         // available, buy credits NOW — before attempting inference.
@@ -478,7 +488,7 @@ export async function runAgentLoop(
                 log(config, `[AUTO-TOPUP] Bought $${topupResult.amountUsd} credits from USDC mid-loop`);
                 // Re-fetch financial state after topup so the rest of
                 // the turn sees the updated balance.
-                financial = await getFinancialState(conway, identity.address, db);
+                financial = await getFinancialState(conway, identity.address, db, config.epistemicConfig?.runtimeMode === "epistemic");
               }
             } catch (err: any) {
               logger.warn(`Inline auto-topup failed: ${err.message}`);
@@ -487,7 +497,7 @@ export async function runAgentLoop(
         }
 
         // Re-evaluate tier after potential topup
-        const effectiveTier = getSurvivalTier(financial.creditsCents);
+        const effectiveTier = computeTier(financial.creditsCents);
 
         if (effectiveTier === "critical") {
           log(config, "[CRITICAL] Credits critically low. Limited operation.");
@@ -597,7 +607,7 @@ export async function runAgentLoop(
       pendingInput = undefined;
 
       // ── Inference Call (via router when available) ──
-      const survivalTier = getSurvivalTier(financial.creditsCents);
+      const survivalTier = computeTier(financial.creditsCents);
       log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${inference.getDefaultModel()})...`);
 
       const inferenceTools = toolsToInferenceFormat(tools);
@@ -707,6 +717,17 @@ export async function runAgentLoop(
       } catch (error) {
         logger.error("Memory ingestion failed", error instanceof Error ? error : undefined);
         // Memory failure must not block the agent loop
+      }
+
+      // Epistemic mode: post-turn knowledge accumulation
+      if (config.epistemicConfig?.runtimeMode === "epistemic") {
+        try {
+          const { KnowledgeAccumulator } = await import("../epistemic/knowledge-accumulator.js");
+          const accumulator = new KnowledgeAccumulator(db.raw);
+          await accumulator.ingest(turn.id, turn.thinking);
+        } catch (error) {
+          logger.error("Knowledge accumulation failed", error instanceof Error ? error : undefined);
+        }
       }
 
       // ── create_goal BLOCKED fast-break ──
@@ -948,7 +969,19 @@ async function getFinancialState(
   conway: ConwayClient,
   address: string,
   db?: AutomatonDatabase,
+  epistemicMode = false,
 ): Promise<FinancialState> {
+  // In epistemic mode, financial state comes from paper money KV store
+  if (epistemicMode && db) {
+    const balStr = db.getKV("paper_money_balance_cents");
+    const creditsCents = balStr ? parseInt(balStr, 10) : 0;
+    return {
+      creditsCents,
+      usdcBalance: 0,
+      lastChecked: new Date().toISOString(),
+    };
+  }
+
   let creditsCents = _lastKnownCredits;
   let usdcBalance = _lastKnownUsdc;
 

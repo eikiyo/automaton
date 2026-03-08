@@ -98,7 +98,7 @@ export function createInferenceClient(
     }
 
     const openAiLikeApiUrl =
-      backend === "openai" ? "https://api.openai.com" :
+      backend === "openai" ? (process.env.OPENAI_BASE_URL || "https://api.openai.com") :
       backend === "ollama" ? (ollamaBaseUrl as string).replace(/\/$/, "") :
       apiUrl;
     const openAiLikeApiKey =
@@ -182,7 +182,7 @@ function resolveInferenceBackend(
 
   // Heuristic fallback (model not in registry yet)
   if (keys.anthropicApiKey && /^claude/i.test(model)) return "anthropic";
-  if (keys.openaiApiKey && /^(gpt-[3-9]|gpt-4|gpt-5|o[1-9][-\s.]|o[1-9]$|chatgpt)/i.test(model)) return "openai";
+  if (keys.openaiApiKey && /^(gpt-[3-9]|gpt-4|gpt-5|o[1-9][-\s.]|o[1-9]$|chatgpt|gemini)/i.test(model)) return "openai";
   return "conway";
 
 }
@@ -195,7 +195,12 @@ async function chatViaOpenAiCompatible(params: {
   backend: "conway" | "openai" | "ollama";
   httpClient: ResilientHttpClient;
 }): Promise<InferenceResponse> {
-  const resp = await params.httpClient.request(`${params.apiUrl}/v1/chat/completions`, {
+  // If base URL already ends with /openai or /v1, don't add /v1 prefix
+  const base = params.apiUrl.replace(/\/$/, "");
+  const chatUrl = base.endsWith("/openai") || base.endsWith("/v1")
+    ? `${base}/chat/completions`
+    : `${base}/v1/chat/completions`;
+  const resp = await params.httpClient.request(chatUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

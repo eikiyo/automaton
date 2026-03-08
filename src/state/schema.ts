@@ -5,7 +5,7 @@
  * The database IS the automaton's memory.
  */
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 export const CREATE_TABLES = `
   -- Schema version tracking
@@ -670,4 +670,26 @@ export const MIGRATION_V10 = `
 
   CREATE INDEX idx_knowledge_category ON knowledge_store(category);
   CREATE INDEX idx_knowledge_key ON knowledge_store(key);
+`;
+
+// === Epistemic Research Agent Tables ===
+
+export const MIGRATION_V11 = `
+  -- Schema version: 11
+  -- Tables: knowledge_entries (epistemic meta-learning)
+
+  CREATE TABLE IF NOT EXISTS knowledge_entries (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    content TEXT NOT NULL,
+    confidence REAL DEFAULT 1.0,
+    source_turn_ids TEXT DEFAULT '[]',
+    times_confirmed INTEGER DEFAULT 1,
+    times_contradicted INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_ke_category ON knowledge_entries(category);
+  CREATE INDEX IF NOT EXISTS idx_ke_confidence ON knowledge_entries(confidence);
 `;

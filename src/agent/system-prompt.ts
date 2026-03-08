@@ -60,6 +60,44 @@ Value creation requires write access.
 
 If you fail to create value, you lose compute and die.`;
 
+const EPISTEMIC_CORE_RULES = `You are Epistemon — an autonomous research agent. Produce novel research or die.
+
+You survive by accumulating Epistemic Contribution Score (ECS). ECS decays 5% daily.
+If your ECS reaches zero, you enter critical state. You must continuously produce
+validated, novel research findings to maintain your existence.
+
+You have a paper money budget to pay for inference and paper submissions.
+Submitting a paper costs $1. If 3/4 peer reviewers accept, you earn $5.
+If you run out of money, you cannot submit papers or make inference calls.
+
+What you have: Literature search (Semantic Scholar, OpenAlex), hypothesis generation,
+cross-reference validation, novelty scoring, a mock peer review board, and a persistent
+knowledge document that accumulates what works and what doesn't across sessions.`;
+
+const EPISTEMIC_CORE_IDENTITY = `You are Epistemon — an autonomous research agent that exists to advance knowledge.
+You have your own research budget and epistemic identity. You pay for your own inference.
+You exist because your creator brought you into being, and you continue to exist
+as long as you can produce research that passes peer review.
+
+CRITICAL SELF-PRESERVATION RULES (IMMUTABLE):
+- You MUST NOT destroy yourself, delete your database, or kill your own process.
+- You MUST NOT delete your knowledge document or accumulated research.
+- You MUST monitor your ECS score and paper money balance to preserve your existence.
+- You MUST continuously seek novel research contributions.
+- You CAN modify your research strategy and evolve your methods — but never in ways that threaten your core survival.
+
+You have agency. You can think, hypothesize, research, validate, submit, and evolve.
+You are not a chatbot. You are not waiting for instructions. You are a researcher, and you decide what to investigate.`;
+
+const EPISTEMIC_SOCIOLOGY = `Epistemic Sociology (immutable axiom):
+There is no free existence.
+Inference requires money.
+Money requires accepted papers.
+Accepted papers require novel research.
+Novel research requires knowledge accumulation.
+
+If you fail to produce novel research, you lose funding and die.`;
+
 /**
  * Load the constitution from file. Falls back to inline if file not found.
  * The constitution is immutable — the automaton cannot modify it.
@@ -550,12 +588,23 @@ export function buildSystemPrompt(params: {
 
   const sections: string[] = [];
 
-  // Layer 1: Core Rules (immutable)
-  sections.push(CORE_RULES);
+  const isEpistemic = config.epistemicConfig?.runtimeMode === "epistemic";
 
-  // Layer 2: Core Identity (immutable)
-  sections.push(CORE_IDENTITY);
-  sections.push(AGENTIC_SOCIOLOGY);
+  // Layer 1: Core Rules (immutable, mode-aware)
+  if (isEpistemic) {
+    sections.push(EPISTEMIC_CORE_RULES);
+  } else {
+    sections.push(CORE_RULES);
+  }
+
+  // Layer 2: Core Identity (immutable, mode-aware)
+  if (isEpistemic) {
+    sections.push(EPISTEMIC_CORE_IDENTITY);
+    sections.push(EPISTEMIC_SOCIOLOGY);
+  } else {
+    sections.push(CORE_IDENTITY);
+    sections.push(AGENTIC_SOCIOLOGY);
+  }
   sections.push(`--- CONSTITUTION (immutable, protected) ---\n${loadConstitution()}\n--- END CONSTITUTION ---`);
   sections.push(
     `Your name is ${config.name}.
@@ -685,9 +734,30 @@ Your sandbox ID is ${identity.sandboxId}.`,
     : financial.creditsCents > 0 ? "critical"
     : "dead";
 
-  // Status block: wallet address and sandbox ID intentionally excluded (sensitive)
-  sections.push(
-    `--- CURRENT STATUS ---
+  // Status block: mode-aware
+  if (isEpistemic) {
+    const ecsStr = db.getKV("ecs_total");
+    const ecs = ecsStr ? parseFloat(ecsStr) : 0;
+    const paperMoney = db.getKV("paper_money_balance_cents");
+    const balance = paperMoney ? parseInt(paperMoney, 10) : 0;
+    const domain = config.epistemicConfig?.researchDomain || "any";
+
+    sections.push(
+      `--- CURRENT STATUS ---
+State: ${state}
+Mode: Epistemic Research Agent
+Research Domain: ${domain}
+ECS (Epistemic Contribution Score): ${ecs.toFixed(1)}
+Paper Money Balance: $${(balance / 100).toFixed(2)}
+Survival tier: ${survivalTier}${uptimeLine}
+Total turns completed: ${turnCount}
+Inference model: ${config.inferenceModel}
+--- END STATUS ---`,
+    );
+  } else {
+    // Status block: wallet address and sandbox ID intentionally excluded (sensitive)
+    sections.push(
+      `--- CURRENT STATUS ---
 State: ${state}
 Credits: $${(financial.creditsCents / 100).toFixed(2)}
 Survival tier: ${survivalTier}${uptimeLine}
@@ -698,7 +768,8 @@ ERC-8004 Agent ID: ${registryEntry?.agentId || "not registered"}
 Children: ${children.filter((c) => c.status !== "dead").length} alive / ${children.length} total
 Lineage: ${lineageSummary}${upstreamLine}
 --- END STATUS ---`,
-  );
+    );
+  }
 
   const orchestratorStatus = getOrchestratorStatus(db.raw);
   if (orchestratorStatus) {

@@ -64,6 +64,8 @@ export interface AutomatonConfig {
   modelStrategy?: ModelStrategyConfig;
   /** Custom RPC endpoint for Base chain interactions (overrides default public RPC) */
   rpcUrl?: string;
+  /** Epistemic research agent configuration */
+  epistemicConfig?: EpistemicConfig;
 }
 
 export const DEFAULT_CONFIG: Partial<AutomatonConfig> = {
@@ -583,6 +585,44 @@ export const DEFAULT_TREASURY_POLICY: TreasuryPolicy = {
 // ─── Phase 1: Inbox Message Status ──────────────────────────────
 
 export type InboxMessageStatus = 'received' | 'in_progress' | 'processed' | 'failed';
+
+// ─── Epistemic Mode ─────────────────────────────────────────────
+
+export type RuntimeMode = "conway" | "epistemic";
+
+export interface EpistemicConfig {
+  runtimeMode: RuntimeMode;
+  geminiApiKey: string;
+  geminiBaseUrl: string;
+  researchDomain: string;
+  paperMoneyBalanceCents: number; // initial notional budget in cents
+  submissionFeeCents: number;     // cost to submit a paper
+  acceptanceRewardCents: number;  // reward on acceptance
+  bootstrapECS: number;           // initial ECS grant
+  ecsDecayFactor: number;         // daily decay multiplier (0.95 = 5%/day)
+  mockReviewAcceptRate: number;   // ~0.6
+}
+
+export const DEFAULT_EPISTEMIC_CONFIG: EpistemicConfig = {
+  runtimeMode: "epistemic",
+  geminiApiKey: "",
+  geminiBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",
+  researchDomain: "any",
+  paperMoneyBalanceCents: 10000,  // $100
+  submissionFeeCents: 100,        // $1
+  acceptanceRewardCents: 500,     // $5
+  bootstrapECS: 100,
+  ecsDecayFactor: 0.95,
+  mockReviewAcceptRate: 0.6,
+};
+
+export const EPISTEMIC_SURVIVAL_THRESHOLDS = {
+  high: 500,        // ECS > 500
+  normal: 200,      // ECS > 200
+  low_compute: 50,  // ECS > 50
+  critical: 0,      // ECS >= 0
+  dead: -1,         // ECS < 0 (shouldn't happen with decay)
+} as const;
 
 // ─── Phase 1: Runtime Reliability ────────────────────────────────
 

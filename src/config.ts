@@ -6,9 +6,9 @@
 
 import fs from "fs";
 import path from "path";
-import type { AutomatonConfig, TreasuryPolicy, ModelStrategyConfig, SoulConfig } from "./types.js";
+import type { AutomatonConfig, TreasuryPolicy, ModelStrategyConfig, SoulConfig, EpistemicConfig } from "./types.js";
 import type { Address } from "viem";
-import { DEFAULT_CONFIG, DEFAULT_TREASURY_POLICY, DEFAULT_MODEL_STRATEGY_CONFIG, DEFAULT_SOUL_CONFIG } from "./types.js";
+import { DEFAULT_CONFIG, DEFAULT_TREASURY_POLICY, DEFAULT_MODEL_STRATEGY_CONFIG, DEFAULT_SOUL_CONFIG, DEFAULT_EPISTEMIC_CONFIG } from "./types.js";
 import { getAutomatonDir } from "./identity/wallet.js";
 import { loadApiKeyFromConfig } from "./identity/provision.js";
 import { createLogger } from "./observability/logger.js";
@@ -61,6 +61,11 @@ export function loadConfig(): AutomatonConfig | null {
       ...(raw.soulConfig ?? {}),
     };
 
+    // Deep-merge epistemic config with defaults (if present)
+    const epistemicConfig: EpistemicConfig | undefined = raw.epistemicConfig
+      ? { ...DEFAULT_EPISTEMIC_CONFIG, ...raw.epistemicConfig }
+      : undefined;
+
     return {
       ...DEFAULT_CONFIG,
       ...raw,
@@ -68,6 +73,7 @@ export function loadConfig(): AutomatonConfig | null {
       treasuryPolicy,
       modelStrategy,
       soulConfig,
+      epistemicConfig,
     } as AutomatonConfig;
   } catch {
     return null;
@@ -90,6 +96,7 @@ export function saveConfig(config: AutomatonConfig): void {
     treasuryPolicy: config.treasuryPolicy ?? DEFAULT_TREASURY_POLICY,
     modelStrategy: config.modelStrategy ?? DEFAULT_MODEL_STRATEGY_CONFIG,
     soulConfig: config.soulConfig ?? DEFAULT_SOUL_CONFIG,
+    ...(config.epistemicConfig ? { epistemicConfig: config.epistemicConfig } : {}),
   };
   fs.writeFileSync(configPath, JSON.stringify(toSave, null, 2), {
     mode: 0o600,
