@@ -518,19 +518,46 @@ export class Orchestrator {
 
     // Recover stale tasks: workers that died (process restart, sandbox crash)
     // leave tasks stuck in 'assigned' forever. Detect and reset them.
+    // Safety: increment retry_count each time; auto-cancel after max_retries
+    // to prevent infinite recovery loops from permanently dead workers.
     if (this.params.isWorkerAlive) {
       const assignedTasks = getTasksByGoal(this.params.db, goal.id)
         .filter((t) => t.status === "assigned" && t.assignedTo);
       for (const task of assignedTasks) {
         const alive = this.params.isWorkerAlive(task.assignedTo!);
         if (!alive) {
-          logger.warn("Recovering stale task from dead worker", {
-            taskId: task.id,
-            worker: task.assignedTo,
-          });
-          this.params.db.prepare(
-            "UPDATE task_graph SET status = 'pending', assigned_to = NULL, started_at = NULL WHERE id = ?",
-          ).run(task.id);
+          const newRetryCount = (task.retryCount || 0) + 1;
+          if (newRetryCount > (task.maxRetries || 3)) {
+            logger.warn("Auto-cancelling stale task after max retries exceeded", {
+              taskId: task.id,
+              worker: task.assignedTo,
+              retryCount: newRetryCount,
+              maxRetries: task.maxRetries || 3,
+            });
+            this.params.db.prepare(
+              "UPDATE task_graph SET status = 'cancelled', result = ? WHERE id = ?",
+            ).run(
+              JSON.stringify({ error: `Auto-cancelled: worker died ${newRetryCount} times, exceeded max_retries` }),
+              task.id,
+            );
+            // Also cancel any tasks that depend on this one
+            this.params.db.prepare(
+              "UPDATE task_graph SET status = 'cancelled', result = ? WHERE status IN ('pending','blocked') AND dependencies LIKE ?",
+            ).run(
+              JSON.stringify({ error: `Cancelled: dependency ${task.id} was auto-cancelled` }),
+              `%${task.id}%`,
+            );
+          } else {
+            logger.warn("Recovering stale task from dead worker", {
+              taskId: task.id,
+              worker: task.assignedTo,
+              retryCount: newRetryCount,
+              maxRetries: task.maxRetries || 3,
+            });
+            this.params.db.prepare(
+              "UPDATE task_graph SET status = 'pending', assigned_to = NULL, started_at = NULL, retry_count = ? WHERE id = ?",
+            ).run(newRetryCount, task.id);
+          }
         }
       }
     }

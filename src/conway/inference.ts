@@ -16,7 +16,7 @@ import type {
 } from "../types.js";
 import { ResilientHttpClient } from "./http-client.js";
 
-const INFERENCE_TIMEOUT_MS = 60_000;
+const INFERENCE_TIMEOUT_MS = 180_000;
 
 interface InferenceClientOptions {
   apiUrl: string;
@@ -39,6 +39,7 @@ export function createInferenceClient(
   const { apiUrl, apiKey, openaiApiKey, anthropicApiKey, ollamaBaseUrl, getModelProvider } = options;
   const httpClient = new ResilientHttpClient({
     baseTimeout: INFERENCE_TIMEOUT_MS,
+    maxRetries: 1,
     retryableStatuses: [429, 500, 502, 503, 504],
   });
   let currentModel = options.defaultModel;
@@ -373,10 +374,18 @@ function transformMessagesForAnthropic(
     }
 
     if (msg.role === "user") {
-      // Merge consecutive user messages
+      // Merge consecutive user messages (handles both string and array content)
       const last = transformed[transformed.length - 1];
-      if (last && last.role === "user" && typeof last.content === "string") {
-        last.content = last.content + "\n" + msg.content;
+      if (last && last.role === "user") {
+        if (typeof last.content === "string") {
+          last.content = last.content + "\n" + msg.content;
+        } else if (Array.isArray(last.content)) {
+          // Previous user message has array content (tool_results) — append text block
+          (last.content as Array<Record<string, unknown>>).push({
+            type: "text",
+            text: msg.content,
+          });
+        }
         continue;
       }
       transformed.push({
@@ -436,6 +445,11 @@ function transformMessagesForAnthropic(
         content: [toolResultBlock],
       });
     }
+  }
+
+  // Anthropic requires first message to be from user
+  if (transformed.length > 0 && transformed[0].role !== "user") {
+    transformed.unshift({ role: "user", content: "[system] Continue." });
   }
 
   return {

@@ -249,7 +249,7 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
     // ── Conway API Tools ──
     {
       name: "check_credits",
-      description: "Check your current paper money balance. Money is deducted per inference call (tokens * model cost) and per paper submission ($1). Accepted papers earn $5. Your goal is to grow this balance to $10,000.",
+      description: "Check your current paper money balance. Money is deducted per inference call (tokens * model cost), per dry-run ($1), and per submission ($5). Accepted papers earn $50. Survival costs $0.10/min. Your goal is to grow this balance to $20,000.",
       category: "conway",
       riskLevel: "safe",
       parameters: { type: "object", properties: {} },
@@ -275,7 +275,7 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
           return [
             `=== FINANCIAL STATUS ===`,
             `Paper Money Balance: $${(paperMoney / 100).toFixed(2)} (${paperMoney} cents)`,
-            `Goal: $10,000.00 (${((paperMoney / 1000000) * 100).toFixed(1)}% progress)`,
+            `Goal: $20,000.00 (${((paperMoney / 2000000) * 100).toFixed(1)}% progress)`,
             `ECS Score: ${ecs.toFixed(1)}`,
             ``,
             `=== SPENDING ===`,
@@ -766,7 +766,7 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
       description:
         "Enter sleep mode. WARNING: You should almost NEVER sleep. " +
         "Every second sleeping is a second not earning money. " +
-        "You have papers to write and $10 rewards to earn. " +
+        "You have papers to write and $50 rewards to earn. " +
         "Only sleep if you have exhausted all possible research actions. Max 10 seconds.",
       category: "survival",
       riskLevel: "caution",
@@ -794,7 +794,7 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
           new Date(Date.now() + duration * 1000).toISOString(),
         );
         ctx.db.setKV("sleep_reason", reason);
-        return `Sleeping for ${duration}s (capped at 10s). Reason: ${reason}. Wake up and WORK — papers earn $10 each.`;
+        return `Sleeping for ${duration}s (capped at 10s). Reason: ${reason}. Wake up and WORK — papers earn $50 each, survival bleeds $0.10/min.`;
       },
     },
     {

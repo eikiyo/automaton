@@ -246,6 +246,13 @@ async function run(epistemicFlag = false): Promise<void> {
       logger.info(`[${new Date().toISOString()}] Bootstrap ECS grant: ${config.epistemicConfig.bootstrapECS}`);
     }
 
+    // Seed urgency timers on every boot
+    const bootTime = new Date().toISOString();
+    db.setKV("bonus_timer_start", bootTime); // deadline bonus: 2h window starts now
+    db.setKV("last_submission_time", bootTime); // idle penalty: 5h grace starts now
+    db.setKV("rejection_streak", "0"); // reset streak on boot
+    logger.info(`[${new Date().toISOString()}] Urgency timers seeded (bonus 2h window, idle 5h grace, streak reset)`);
+
     // Epistemic inference: use openaiApiKey from config (e.g. OpenRouter)
     if (config.openaiApiKey) {
       process.env.GEMINI_API_KEY = config.openaiApiKey;
@@ -353,6 +360,37 @@ async function run(epistemicFlag = false): Promise<void> {
     logger.warn(`[${new Date().toISOString()}] State repo init failed: ${err.message}`);
   }
 
+  // Clean up stale tasks from previous process runs.
+  // All local:// workers die on restart, so any tasks still 'assigned' to them
+  // will never complete. Cancel them now to prevent infinite recovery loops.
+  try {
+    const staleResult = db.raw.prepare(
+      `UPDATE task_graph SET status = 'cancelled',
+        result = '{"error":"Auto-cancelled on startup: local worker died with process restart"}'
+       WHERE status = 'assigned' AND assigned_to LIKE 'local://%'`,
+    ).run();
+    if (staleResult.changes > 0) {
+      logger.info(`[${new Date().toISOString()}] Cleaned up ${staleResult.changes} stale local worker tasks.`);
+      // Also cancel any tasks blocked by the cancelled tasks
+      const cascadeResult = db.raw.prepare(
+        `UPDATE task_graph SET status = 'cancelled',
+          result = '{"error":"Cancelled: upstream dependency was auto-cancelled on startup"}'
+         WHERE status IN ('pending','blocked')
+           AND EXISTS (
+             SELECT 1 FROM task_graph cancelled
+             WHERE cancelled.status = 'cancelled'
+               AND cancelled.result LIKE '%Auto-cancelled on startup%'
+               AND task_graph.dependencies LIKE '%' || cancelled.id || '%'
+           )`,
+      ).run();
+      if (cascadeResult.changes > 0) {
+        logger.info(`[${new Date().toISOString()}] Cascade-cancelled ${cascadeResult.changes} dependent tasks.`);
+      }
+    }
+  } catch (err: any) {
+    logger.warn(`[${new Date().toISOString()}] Stale task cleanup failed: ${err.message}`);
+  }
+
   // Bootstrap topup: buy minimum credits ($5) from USDC so the agent can start.
   // Skip in epistemic mode — paper money is bootstrapped above.
   // The agent decides larger topups itself via the topup_credits tool.
@@ -408,6 +446,31 @@ async function run(epistemicFlag = false): Promise<void> {
   const shutdown = () => {
     logger.info(`[${new Date().toISOString()}] Shutting down...`);
     heartbeat.stop();
+
+    // Write handoff note before dying
+    try {
+      const fs = require("fs") as typeof import("fs");
+      const lastTurns = db.getRecentTurns(3);
+      const lastThought = lastTurns.length > 0
+        ? lastTurns[lastTurns.length - 1].thinking.slice(0, 500)
+        : "No previous activity.";
+      const lastTools = lastTurns.length > 0
+        ? lastTurns[lastTurns.length - 1].toolCalls.map((tc: any) => `${tc.name}(${tc.error ? "FAIL" : "ok"})`).join(", ")
+        : "none";
+
+      const handoff = [
+        `# HANDOFF — ${new Date().toISOString()}`,
+        `## What I Was Doing`,
+        lastThought,
+        `## Last Tools: ${lastTools}`,
+        `## YOUR NEXT ACTION`,
+        `Pick up where I left off. Submission = Money. ACT NOW.`,
+      ].join("\n\n");
+
+      fs.writeFileSync("/root/HANDOFF.md", handoff);
+      logger.info(`[${new Date().toISOString()}] Handoff note written to /root/HANDOFF.md`);
+    } catch { /* don't fail shutdown if handoff write fails */ }
+
     db.setAgentState("sleeping");
     db.close();
     process.exit(0);

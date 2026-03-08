@@ -1,15 +1,17 @@
 /**
  * Location: packages/submission-gate/src/index.ts
- * Purpose: JIBS AAA Quality Gate v3.0 — 286 gates, 20 dimensions, scored by Gemini 2.5 Pro
+ * Purpose: JIBS AAA Quality Gate v3.0 — 286 gates, 20 dimensions, scored by Claude Sonnet 4.6
  * Functions: handleSubmit, handleList, handleDetail, handleRules, renderUI
- * Calls: Gemini 2.5 Pro (via Google AI API), KV
+ * Calls: Claude Sonnet 4.6 (Anthropic API primary), Workers AI fallback, KV
  * Imports: none (standalone CF Worker)
  */
 
 interface Env {
   AI: Ai;
   SUBMISSIONS: KVNamespace;
+  ANTHROPIC_API_KEY: string;
   GEMINI_API_KEY: string;
+  OPENROUTER_API_KEY: string;
 }
 
 // ─── Types ────────────────────────────────────────────────────
@@ -755,7 +757,7 @@ async function handleEvaluate(request: Request, env: Env): Promise<Response> {
     return json({ error: "Paper content too short. Minimum 500 characters." }, 400);
   }
 
-  const results = await evaluateGates(content, env);
+  const results = await evaluateGates(content, env, "fast");
   const { score, passed, failed, partial, totalPoints, verdict, rejectReason, dimensionScores } = computeScore(results);
 
   // Save dry run to KV so it appears in the dashboard
@@ -882,9 +884,9 @@ function normalizeContent(content: string): string {
     .trim();
 }
 
-// ─── Gate Evaluation (Gemini 2.5 Pro) ─────────────────────────
+// ─── Gate Evaluation (Claude Sonnet 4.6) ─────────────────────────
 
-async function evaluateGates(paperContent: string, env: Env): Promise<GateResult[]> {
+async function evaluateGates(paperContent: string, env: Env, mode: "fast" | "thorough" = "thorough"): Promise<GateResult[]> {
   const truncated = normalizeContent(paperContent).slice(0, 60000);
 
   const gateList = DIMENSIONS.map((d) => {
@@ -909,14 +911,18 @@ QUALITATIVE gates (marked [QUALITATIVE]): Score "FULL", "PARTIAL", or "ABSENT".
   - FULL = criterion met rigorously and without qualification (1 point)
   - PARTIAL = criterion present but shallow, inconsistent, or incomplete (0.5 points)
   - ABSENT = criterion not met (0 points)
-  - These test execution depth, not presence. A paper full of PARTIALs is a major revision.
 
 GATES:
 ${gateList}
 
-Respond with ONLY a JSON array — no markdown, no explanation, no wrapping.
-For BINARY gates: {"id":"D01-01","score":"YES","reasoning":"..."}
-For QUALITATIVE gates: {"id":"D00-06","score":"PARTIAL","reasoning":"..."}
+Respond with ONLY a JSON array — no markdown, no code fences, no explanation.
+For BINARY gates that PASS: {"id":"D01-01","score":"YES","reasoning":""}
+For BINARY gates that FAIL: {"id":"D01-01","score":"NO","reasoning":"1. ... 2. ... 3. ..."}
+For QUALITATIVE gates FULL: {"id":"D00-06","score":"FULL","reasoning":""}
+For QUALITATIVE gates PARTIAL/ABSENT: {"id":"D00-06","score":"PARTIAL","reasoning":"1. ... 2. ... 3. ..."}
+
+IMPORTANT: For gates that FAIL or are PARTIAL/ABSENT, the "reasoning" field must contain EXACTLY 3 specific, actionable improvement points. Nothing else — no diagnosis, no praise, just 3 fixes.
+For gates that PASS or are FULL, leave "reasoning" as empty string.
 
 Every gate ID must appear exactly once. ${TOTAL_GATES} entries total.
 
@@ -924,12 +930,12 @@ Every gate ID must appear exactly once. ${TOTAL_GATES} entries total.
 ${truncated}
 --- PAPER END ---`;
 
-  // Try Gemini 2.5 Pro first
-  if (env.GEMINI_API_KEY) {
+  // Primary: Claude Sonnet 4.6 via Anthropic API
+  if (env.ANTHROPIC_API_KEY) {
     try {
-      const geminiResult = await callGemini(prompt, env.GEMINI_API_KEY);
-      if (geminiResult) {
-        return mapResults(geminiResult);
+      const anthropicResult = await callAnthropic(prompt, env.ANTHROPIC_API_KEY);
+      if (anthropicResult) {
+        return mapResults(anthropicResult);
       }
     } catch {
       // Fall through to Workers AI
@@ -969,50 +975,39 @@ ${truncated}
   }));
 }
 
-async function callGemini(prompt: string, apiKey: string): Promise<any[] | null> {
-  // Pro primary (paid key), fall back to Flash if quota exceeded (429)
-  const models = ["gemini-2.5-pro", "gemini-2.5-flash"];
-  for (const model of models) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.2,
-            maxOutputTokens: 16000,
-            responseMimeType: "application/json",
-          },
-        }),
-      });
+async function callAnthropic(prompt: string, apiKey: string): Promise<any[] | null> {
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6-20250514",
+      max_tokens: 16000,
+      temperature: 0.2,
+      system: "You are an expert academic peer reviewer. Respond with ONLY a JSON array — no markdown, no code fences, no explanation.",
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
 
-      if (!resp.ok) {
-        // 429 = quota exceeded, try next model
-        if (resp.status === 429) continue;
-        return null;
-      }
+  if (!resp.ok) return null;
 
-      const data = await resp.json() as any;
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  const data = await resp.json() as any;
+  const text = data?.content?.[0]?.text || "";
 
-      const arrMatch = text.match(/\[[\s\S]*\]/);
-      if (arrMatch) {
-        return JSON.parse(arrMatch[0]);
-      }
-
-      try {
-        const parsed = JSON.parse(text);
-        return Array.isArray(parsed) ? parsed : null;
-      } catch {
-        continue; // Bad JSON, try next model
-      }
-    } catch {
-      continue; // Network error, try next model
-    }
+  const arrMatch = text.match(/\[[\s\S]*\]/);
+  if (arrMatch) {
+    return JSON.parse(arrMatch[0]);
   }
-  return null;
+
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function mapResults(parsed: any[]): GateResult[] {
@@ -1177,7 +1172,7 @@ async function renderHomePage(env: Env): Promise<Response> {
       </section>
 
       <footer>
-        <p>${TOTAL_GATES} gates &middot; ${DIMENSIONS.length} dimensions &middot; ${CRITICAL_GATES.length} critical auto-rejects &middot; Powered by Gemini 2.5 Pro</p>
+        <p>${TOTAL_GATES} gates &middot; ${DIMENSIONS.length} dimensions &middot; ${CRITICAL_GATES.length} critical auto-rejects &middot; Powered by Claude Sonnet 4.6</p>
       </footer>
     </div>
 
@@ -1194,7 +1189,7 @@ async function renderHomePage(env: Env): Promise<Response> {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       btn.disabled = true;
-      btn.textContent = 'Evaluating (${TOTAL_GATES} gates via Gemini 2.5 Pro)...';
+      btn.textContent = 'Evaluating (${TOTAL_GATES} gates via Claude Sonnet 4.6)...';
       resultBox.style.display = 'none';
 
       const fd = new FormData(form);

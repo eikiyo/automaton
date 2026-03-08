@@ -14,6 +14,13 @@ import { NoveltyScorer } from "./novelty.js";
 import { ECSScorer } from "./scorer.js";
 import { MockReviewBoard } from "./mock-review-board.js";
 import { PaperMoneyProvider } from "./provider.js";
+import { WorldBankClient } from "./data-sources/world-bank.js";
+import { FREDClient } from "./data-sources/fred.js";
+import { IMFClient } from "./data-sources/imf.js";
+import { OECDClient } from "./data-sources/oecd.js";
+import { ComtradeClient } from "./data-sources/comtrade.js";
+import { EurostatClient } from "./data-sources/eurostat.js";
+import { RestCountriesClient } from "./data-sources/rest-countries.js";
 import { createLogger } from "../observability/logger.js";
 
 const logger = createLogger("epistemic.tools");
@@ -40,6 +47,14 @@ export function createEpistemicTools(epistemicConfig: EpistemicConfig): Automato
     process.env.SEMANTIC_SCHOLAR_API_KEY,
   );
   const scorer = new ECSScorer();
+  const worldBank = new WorldBankClient();
+  const fredApiKey = process.env.FRED_API_KEY || "";
+  const fredClient = fredApiKey ? new FREDClient(fredApiKey) : null;
+  const imfClient = new IMFClient();
+  const oecdClient = new OECDClient();
+  const comtradeClient = new ComtradeClient();
+  const eurostatClient = new EurostatClient();
+  const restCountries = new RestCountriesClient();
   let noveltyScorer: NoveltyScorer | null = null;
   if (epistemicConfig.geminiApiKey) {
     noveltyScorer = new NoveltyScorer(epistemicConfig.geminiApiKey);
@@ -402,7 +417,7 @@ ${bibEntries}
     {
       name: "submit_for_review",
       description:
-        "Submit findings for peer review. Costs $5 submission fee. If accepted (SUBMIT verdict), earns $20. " +
+        "Submit findings for peer review. Fee starts at $5, escalates +$3 per rejection (cap $15), resets on acceptance. If accepted earns $50 ($100 if within 2h of boot/last acceptance). " +
         "Also submits to the external Submission Gate (288-gate JIBS AAA quality review at " +
         "https://epistemon-submission-gate.syedmosayebalam.workers.dev). " +
         "To read submission rules first, use fetch_submission_rules.",
@@ -465,8 +480,17 @@ ${bibEntries}
           epistemicConfig.paperMoneyBalanceCents,
           epistemicConfig.ecsDecayFactor,
         );
-        // Mock review board gives feedback only — reward ONLY from Submission Gate (Gemini 2.5 Pro)
-        const board = new MockReviewBoard(provider, epistemicConfig.mockReviewAcceptRate, 0);
+
+        // Escalating submission fee: $5 + $3 per consecutive rejection, cap $15
+        const streakStr = ctx.db.raw.prepare("SELECT value FROM kv WHERE key = 'rejection_streak'").get() as any;
+        const rejectionStreak = streakStr ? parseInt(streakStr.value, 10) || 0 : 0;
+        const escalatingFee = Math.min(1500, 500 + 300 * rejectionStreak); // cents
+
+        // Record submission time for idle penalty tracking
+        ctx.db.raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('last_submission_time', ?)").run(new Date().toISOString());
+
+        // Mock review board gives feedback only — reward ONLY from Submission Gate (Claude Sonnet 4.6)
+        const board = new MockReviewBoard(provider, epistemicConfig.mockReviewAcceptRate, 0, escalatingFee);
 
         const title = args.title as string;
         const content = args.content as string;
@@ -477,7 +501,7 @@ ${bibEntries}
         );
 
         // Fire-and-forget to Submission Gate — don't wait, result shows on dashboard
-        // 288-gate eval via Gemini 2.5 Pro can take 60-90s; extend timeout to 3 min
+        // 288-gate eval via Claude Sonnet 4.6 can take 60-90s; extend timeout to 3 min
         const gateUrl = epistemicConfig.submissionGateUrl || "https://epistemon-submission-gate.syedmosayebalam.workers.dev";
         const gateAbort = new AbortController();
         const gateTimeout = setTimeout(() => gateAbort.abort(), 180_000);
@@ -492,15 +516,34 @@ ${bibEntries}
             resp.json().then((d: any) => {
               logger.info(`[SUBMIT] Gate result: ${d.score}/100 | ${d.verdict} | ${d.passed}/${d.passed + (d.partial || 0) + d.failed} gates | Partial: ${d.partial || 0}`);
               if (d.accepted) {
-                const reward = epistemicConfig.acceptanceRewardCents || 2000;
-                provider.deposit(reward, `Submission Gate ACCEPTED: "${title}" (${d.score}/100)`);
+                // Deadline bonus: $100 if within 2h of boot/last acceptance, else $50
+                const bonusTimerStr = ctx.db.raw.prepare("SELECT value FROM kv WHERE key = 'bonus_timer_start'").get() as any;
+                const bonusStart = bonusTimerStr ? new Date(bonusTimerStr.value).getTime() : Date.now();
+                const hoursSinceBoot = (Date.now() - bonusStart) / (1000 * 60 * 60);
+                const reward = hoursSinceBoot <= 2
+                  ? 10000  // $100 early bird bonus
+                  : (epistemicConfig.acceptanceRewardCents || 5000); // $50 flat
+                const bonusLabel = hoursSinceBoot <= 2 ? " (EARLY BIRD 2h BONUS!)" : "";
+
+                provider.deposit(reward, `Submission Gate ACCEPTED${bonusLabel}: "${title}" (${d.score}/100)`);
                 const ecsDelta = scorer.compute({ novelty: 0.6 + Math.random() * 0.3, validity: 0.5 + Math.random() * 0.3, coherence: 0.6 + Math.random() * 0.2, utility: 0 });
                 provider.addECS(ecsDelta);
-                logger.info(`[SUBMIT] ACCEPTED! +$${(reward / 100).toFixed(2)} deposited, ECS +${ecsDelta}`);
+                logger.info(`[SUBMIT] ACCEPTED${bonusLabel}! +$${(reward / 100).toFixed(2)} deposited, ECS +${ecsDelta}`);
+
+                // Reset rejection streak and bonus timer on acceptance
+                ctx.db.raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('rejection_streak', '0')").run();
+                ctx.db.raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('bonus_timer_start', ?)").run(new Date().toISOString());
+
                 // Set 30-min cooldown — agent must sleep and research new topic
                 const cooldown = new Date(Date.now() + 30 * 60 * 1000).toISOString();
                 ctx.db.raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('submission_cooldown_until', ?)").run(cooldown);
                 logger.info(`[SUBMIT] Cooldown set until ${cooldown} — agent must research new topic`);
+              } else {
+                // Rejection: increment streak (escalates next submission fee)
+                const newStreak = rejectionStreak + 1;
+                ctx.db.raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('rejection_streak', ?)").run(String(newStreak));
+                const nextFee = Math.min(1500, 500 + 300 * newStreak);
+                logger.info(`[SUBMIT] REJECTED. Streak: ${newStreak}. Next submission fee: $${(nextFee / 100).toFixed(2)}`);
               }
             });
           } else {
@@ -514,16 +557,19 @@ ${bibEntries}
         const trimmed = pastPapers.slice(-50);
         ctx.db.raw.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES ('submitted_paper_vectors', ?)").run(JSON.stringify(trimmed));
 
+        const nextFee = Math.min(1500, 500 + 300 * (rejectionStreak + 1));
         return [
           `=== MOCK REVIEW ===`,
           result.summary,
           `Submission ID: ${result.submissionId}`,
-          `Fee paid: $${(result.feePaid / 100).toFixed(2)}`,
+          `Fee paid: $${(result.feePaid / 100).toFixed(2)} (rejection streak: ${rejectionStreak}, next fee if rejected: $${(nextFee / 100).toFixed(2)}, cap: $15)`,
           ``,
           `Judge verdicts:`,
           ...verdictLines,
           ``,
           `Submission Gate: fired in background — check dashboard for full 288-gate result.`,
+          `If ACCEPTED: reward = $50 (or $100 early bird if within 2h of boot/last acceptance). Streak resets to 0.`,
+          `If REJECTED: streak → ${rejectionStreak + 1}, next fee → $${(nextFee / 100).toFixed(2)}`,
           `Paper money balance: $${(provider.getBalance() / 100).toFixed(2)}`,
           `ECS: ${provider.getECS()}`,
         ].join("\n");
@@ -555,7 +601,7 @@ ${bibEntries}
             `=== SUBMISSION GATE RULES ===`,
             `Submit to: ${gateUrl}/api/submit (POST JSON with { title, content })`,
             `Total gates: ${rules.totalGates} | Critical: ${rules.criticalGates}`,
-            `Scoring: 90-100=SUBMIT($20), 75-89=MINOR, 60-74=MAJOR, <60=DO NOT SUBMIT`,
+            `Scoring: 90-100=SUBMIT($50), 75-89=MINOR, 60-74=MAJOR, <60=DO NOT SUBMIT`,
             ``,
           ];
           // Flatten dimensions into gate list
@@ -981,11 +1027,15 @@ ${bibEntries}
 
         const gateUrl = epistemicConfig.submissionGateUrl || "https://epistemon-submission-gate.syedmosayebalam.workers.dev";
         try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 180000); // 3 min timeout
           const resp = await fetch(`${gateUrl}/api/evaluate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ title: args.title, content: args.content }),
+            signal: controller.signal,
           });
+          clearTimeout(timeout);
           if (!resp.ok) {
             const errText = await resp.text();
             return `Self-evaluate failed: HTTP ${resp.status} — ${errText}`;
@@ -1934,6 +1984,527 @@ ${bibEntries}
           }
         }
         return `Guidance not found for '${dim}'. Use fetch_guidance('all') to see available documents.`;
+      },
+    },
+
+    // ── Data: World Bank ──
+    {
+      name: "query_world_bank",
+      description:
+        "Query the World Bank Open Data API for economic indicators across 200+ countries. " +
+        "Use mode='search' to find indicator IDs (e.g. 'GDP per capita', 'FDI inflows'). " +
+        "Use mode='data' with an indicator_id to get actual values. " +
+        "Use mode='snapshot' to get key indicators for countries at a glance. " +
+        "FREE — no cost. Use this to find real quantitative evidence for your hypotheses.",
+      category: "research",
+      riskLevel: "safe",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["search", "data", "snapshot"],
+            description: "search=find indicators, data=get values for an indicator, snapshot=key metrics for countries",
+          },
+          query: { type: "string", description: "Search query (for mode=search)" },
+          indicator_id: { type: "string", description: "World Bank indicator ID e.g. 'NY.GDP.PCAP.CD' (for mode=data)" },
+          countries: {
+            type: "array",
+            items: { type: "string" },
+            description: "ISO2 country codes e.g. ['US','CN','DE'] (for mode=data/snapshot). Omit for global.",
+          },
+          start_year: { type: "number", description: "Start year (default 2015)" },
+          end_year: { type: "number", description: "End year (default 2023)" },
+        },
+        required: ["mode"],
+      },
+      execute: async (args, _ctx) => {
+        const mode = args.mode as string;
+        const countries = (args.countries as string[]) || [];
+        const startYear = (args.start_year as number) || 2015;
+        const endYear = (args.end_year as number) || 2023;
+
+        if (mode === "search") {
+          const query = args.query as string;
+          if (!query) return "Provide a 'query' parameter to search indicators. Example: 'FDI net inflows'";
+          const result = await worldBank.searchIndicators(query);
+          if (result.indicators.length === 0) return `No indicators found for "${query}". Try broader terms.`;
+          const lines = result.indicators.map((ind, i) =>
+            `[${i + 1}] ${ind.id} — ${ind.name}\n    ${ind.sourceNote || "No description"}`
+          );
+          return `Found ${result.total} indicators (showing ${result.indicators.length}):\n\n${lines.join("\n\n")}\n\nUse mode='data' with indicator_id to get actual values.`;
+        }
+
+        if (mode === "data") {
+          const indicatorId = args.indicator_id as string;
+          if (!indicatorId) return "Provide 'indicator_id' (e.g. 'NY.GDP.PCAP.CD'). Use mode='search' to find IDs.";
+          const result = await worldBank.getIndicatorData(indicatorId, countries.length > 0 ? countries : ["all"], startYear, endYear);
+          if (result.data.length === 0) return `No data for indicator ${indicatorId}. Check the ID or broaden the year range.`;
+
+          // Group by country, show latest value + trend
+          const byCountry = new Map<string, any[]>();
+          for (const d of result.data) {
+            const existing = byCountry.get(d.country) || [];
+            existing.push(d);
+            byCountry.set(d.country, existing);
+          }
+
+          const lines: string[] = [`Indicator: ${result.data[0].indicatorName} (${indicatorId})`, `Period: ${startYear}-${endYear}`, ""];
+          // Limit to 20 countries to avoid overwhelming output
+          let count = 0;
+          for (const [country, points] of byCountry) {
+            if (count >= 20) { lines.push(`... and ${byCountry.size - 20} more countries`); break; }
+            const sorted = points.sort((a, b) => a.year - b.year);
+            const latest = sorted[sorted.length - 1];
+            const earliest = sorted[0];
+            const trend = sorted.length >= 2 && earliest.value && latest.value
+              ? ((latest.value - earliest.value) / Math.abs(earliest.value) * 100).toFixed(1) + "% change"
+              : "";
+            lines.push(`${country}: ${latest.value?.toFixed(2) ?? "N/A"} (${latest.year}) ${trend ? `[${trend}]` : ""}`);
+            count++;
+          }
+          return lines.join("\n");
+        }
+
+        if (mode === "snapshot") {
+          if (countries.length === 0) return "Provide 'countries' array with ISO2 codes (e.g. ['US','CN','IN']) for snapshot.";
+          const snapshot = await worldBank.getCountrySnapshot(countries, endYear);
+          return `Country Snapshot (${endYear}):\n${snapshot}`;
+        }
+
+        return "Invalid mode. Use 'search', 'data', or 'snapshot'.";
+      },
+    },
+
+    // ── Data: FRED ──
+    {
+      name: "query_fred",
+      description:
+        "Query FRED (Federal Reserve Economic Data) — 816,000+ economic time series. " +
+        "Use mode='search' to find series IDs (e.g. 'inflation', 'trade balance', 'interest rate'). " +
+        "Use mode='data' with a series_id to get actual values with statistics. " +
+        "FREE — no cost. Essential for macroeconomic evidence in your papers." +
+        (fredClient ? "" : " NOTE: FRED_API_KEY not set — this tool is currently unavailable."),
+      category: "research",
+      riskLevel: "safe",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["search", "data"],
+            description: "search=find series, data=get values for a series",
+          },
+          query: { type: "string", description: "Search query (for mode=search)" },
+          series_id: { type: "string", description: "FRED series ID e.g. 'GDP', 'UNRATE', 'FEDFUNDS' (for mode=data)" },
+          start_date: { type: "string", description: "Start date YYYY-MM-DD (default 2015-01-01)" },
+          end_date: { type: "string", description: "End date YYYY-MM-DD (default 2023-12-31)" },
+        },
+        required: ["mode"],
+      },
+      execute: async (args, _ctx) => {
+        if (!fredClient) {
+          return "FRED API unavailable: FRED_API_KEY environment variable not set. Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html";
+        }
+
+        const mode = args.mode as string;
+
+        if (mode === "search") {
+          const query = args.query as string;
+          if (!query) return "Provide a 'query' parameter. Example: 'trade balance', 'consumer price index'";
+          const result = await fredClient.searchSeries(query);
+          if (result.series.length === 0) return `No series found for "${query}". Try broader terms.`;
+          const lines = result.series.map((s, i) =>
+            `[${i + 1}] ${s.id} — ${s.title}\n    Frequency: ${s.frequency} | Units: ${s.units}\n    ${s.notes || ""}`
+          );
+          return `Found ${result.total} series (showing ${result.series.length}):\n\n${lines.join("\n\n")}\n\nUse mode='data' with series_id to get actual values.`;
+        }
+
+        if (mode === "data") {
+          const seriesId = args.series_id as string;
+          if (!seriesId) return "Provide 'series_id' (e.g. 'GDP', 'UNRATE'). Use mode='search' to find IDs.";
+          const startDate = (args.start_date as string) || "2015-01-01";
+          const endDate = (args.end_date as string) || "2023-12-31";
+          const result = await fredClient.getSeriesData(seriesId, startDate, endDate);
+          if (result.observations.length === 0) return `No data for series ${seriesId}. Check the ID or date range.`;
+          return fredClient.formatSummary(result);
+        }
+
+        return "Invalid mode. Use 'search' or 'data'.";
+      },
+    },
+
+    // ── Data: IMF ──
+    {
+      name: "query_imf",
+      description:
+        "Query the IMF DataMapper — 133 macroeconomic indicators across 241 countries. " +
+        "Use mode='search' to find indicators (e.g. 'GDP', 'inflation', 'debt', 'trade'). " +
+        "Use mode='data' with an indicator_id to get values by country and year. " +
+        "FREE — no cost. Key indicators: NGDP_RPCH (GDP growth), PCPIPCH (inflation), " +
+        "BCA (current account), LUR (unemployment), GGXWDG_NGDP (govt debt % GDP).",
+      category: "research",
+      riskLevel: "safe",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["search", "data"],
+            description: "search=find indicators, data=get values",
+          },
+          query: { type: "string", description: "Search query (for mode=search)" },
+          indicator_id: { type: "string", description: "IMF indicator ID e.g. 'NGDP_RPCH' (for mode=data)" },
+          countries: {
+            type: "array",
+            items: { type: "string" },
+            description: "ISO3 country codes e.g. ['USA','CHN','DEU']. Omit for all countries (limited to top 20).",
+          },
+          start_year: { type: "number", description: "Start year (default 2015)" },
+          end_year: { type: "number", description: "End year (default 2023)" },
+        },
+        required: ["mode"],
+      },
+      execute: async (args, _ctx) => {
+        const mode = args.mode as string;
+
+        if (mode === "search") {
+          const query = args.query as string;
+          if (!query) return "Provide a 'query' parameter. Example: 'inflation', 'trade balance', 'debt'";
+          const results = await imfClient.searchIndicators(query);
+          if (results.length === 0) return `No IMF indicators found for "${query}". Try broader terms like 'GDP', 'trade', 'price'.`;
+          const lines = results.map((ind, i) =>
+            `[${i + 1}] ${ind.id} — ${ind.label}\n    Unit: ${ind.unit} | Dataset: ${ind.dataset}\n    ${ind.description.slice(0, 150)}`
+          );
+          return `Found ${results.length} IMF indicators:\n\n${lines.join("\n\n")}\n\nUse mode='data' with indicator_id to get values.`;
+        }
+
+        if (mode === "data") {
+          const indicatorId = args.indicator_id as string;
+          if (!indicatorId) return "Provide 'indicator_id' (e.g. 'NGDP_RPCH'). Use mode='search' to find IDs.";
+          const countries = (args.countries as string[]) || [];
+          const startYear = (args.start_year as number) || 2015;
+          const endYear = (args.end_year as number) || 2023;
+
+          const data = await imfClient.getIndicatorData(indicatorId, countries, startYear, endYear);
+          if (data.length === 0) return `No data for IMF indicator ${indicatorId}. Check the ID or year range.`;
+
+          // Group by country
+          const byCountry = new Map<string, any[]>();
+          for (const d of data) {
+            const existing = byCountry.get(d.countryCode) || [];
+            existing.push(d);
+            byCountry.set(d.countryCode, existing);
+          }
+
+          const lines: string[] = [`IMF Indicator: ${indicatorId}`, `Period: ${startYear}-${endYear}`, ""];
+          let count = 0;
+          for (const [code, points] of byCountry) {
+            if (count >= 20) { lines.push(`... and ${byCountry.size - 20} more countries`); break; }
+            const sorted = points.sort((a: any, b: any) => a.year.localeCompare(b.year));
+            const latest = sorted[sorted.length - 1];
+            const values = sorted.map((p: any) => `${p.year}:${typeof p.value === "number" ? p.value.toFixed(2) : "N/A"}`).join(", ");
+            lines.push(`${latest.country} (${code}): ${values}`);
+            count++;
+          }
+          return lines.join("\n");
+        }
+
+        return "Invalid mode. Use 'search' or 'data'.";
+      },
+    },
+
+    // ── Data: OECD ──
+    {
+      name: "query_oecd",
+      description:
+        "Query OECD data — 1,475+ datasets on FDI, trade, digital economy, services restrictions. " +
+        "Use mode='list' to see curated datasets (FDI flows, STRI, Digital STRI, trade, INDIGO). " +
+        "Use mode='search' to find any OECD dataset by keyword. " +
+        "Use mode='data' with a dataset_key to query values. " +
+        "FREE — no cost. Especially valuable: digital_stri, fdi_restrictiveness, indigo (digital trade openness).",
+      category: "research",
+      riskLevel: "safe",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["list", "search", "data", "structure"],
+            description: "list=curated datasets, search=find any dataset, data=get values, structure=show dimensions",
+          },
+          query: { type: "string", description: "Search query (for mode=search)" },
+          dataset_key: { type: "string", description: "Dataset key from curated list (for mode=data/structure)" },
+          countries: {
+            type: "array",
+            items: { type: "string" },
+            description: "ISO3 country codes e.g. ['USA','DEU','GBR'] (for mode=data)",
+          },
+          start_period: { type: "string", description: "Start period e.g. '2018' (default)" },
+          end_period: { type: "string", description: "End period e.g. '2023' (default)" },
+        },
+        required: ["mode"],
+      },
+      execute: async (args, _ctx) => {
+        const mode = args.mode as string;
+
+        if (mode === "list") {
+          const datasets = oecdClient.listCuratedDatasets();
+          const lines = datasets.map((ds, i) => `[${i + 1}] ${ds.id} — ${ds.name}\n    ${ds.description}`);
+          return `Curated OECD datasets for IB research:\n\n${lines.join("\n\n")}\n\nUse mode='data' with dataset_key. Use mode='search' to find more.`;
+        }
+
+        if (mode === "search") {
+          const query = args.query as string;
+          if (!query) return "Provide a 'query' parameter. Example: 'digital trade', 'FDI', 'services restriction'";
+          const flows = await oecdClient.searchDataflows(query);
+          if (flows.length === 0) return `No OECD datasets found for "${query}".`;
+          const lines = flows.map((f, i) => `[${i + 1}] ${f.agencyId}/${f.id} — ${f.name}`);
+          return `Found ${flows.length} OECD datasets:\n\n${lines.join("\n")}\n\nNote: To query these, use the curated dataset keys or provide the full agency/flow path.`;
+        }
+
+        if (mode === "structure") {
+          const key = args.dataset_key as string;
+          if (!key) return "Provide 'dataset_key' from the curated list.";
+          const struct = await oecdClient.getDatasetStructure(key);
+          if (!struct) return `Could not fetch structure for '${key}'.`;
+          const lines = struct.dimensions.map(d => `  ${d.position}: ${d.id}`);
+          return `Dataset '${key}' dimensions:\n${lines.join("\n")}`;
+        }
+
+        if (mode === "data") {
+          const key = args.dataset_key as string;
+          if (!key) return "Provide 'dataset_key' from the curated list. Use mode='list' to see options.";
+          const countries = (args.countries as string[]) || [];
+          const startPeriod = (args.start_period as string) || "2018";
+          const endPeriod = (args.end_period as string) || "2023";
+
+          const result = await oecdClient.queryData(key, countries, startPeriod, endPeriod);
+          if (result.raw && result.observations === 0) {
+            return `OECD query for '${key}' returned no data. ${result.raw}`;
+          }
+          if (result.observations === 0) {
+            return `No data found for '${key}' with the given filters. Try broader parameters.`;
+          }
+
+          // Format top observations grouped by country
+          const lines: string[] = [`OECD Dataset: ${key} | ${result.observations} observations`, ""];
+          const byCountry = new Map<string, any[]>();
+          for (const obs of result.data.slice(0, 100)) {
+            const country = obs.country_name || obs.REF_AREA || "Unknown";
+            const existing = byCountry.get(country) || [];
+            existing.push(obs);
+            byCountry.set(country, existing);
+          }
+
+          let count = 0;
+          for (const [country, obs] of byCountry) {
+            if (count >= 15) { lines.push(`... and ${byCountry.size - 15} more countries`); break; }
+            const vals = obs.slice(0, 5).map((o: any) => {
+              const period = o.TIME_PERIOD || o.FREQ || "";
+              return `${period}=${typeof o.value === "number" ? o.value.toFixed(3) : o.value}`;
+            }).join(", ");
+            lines.push(`${country}: ${vals}`);
+            count++;
+          }
+          return lines.join("\n");
+        }
+
+        return "Invalid mode. Use 'list', 'search', 'data', or 'structure'.";
+      },
+    },
+
+    // ── Data: UN Comtrade ──
+    {
+      name: "query_comtrade",
+      description:
+        "Query UN Comtrade — bilateral trade flows between countries. " +
+        "Use mode='trade' to get export/import data between countries. " +
+        "Use mode='countries' to see available country codes. " +
+        "FREE — no cost. Shows actual trade values in USD between any two countries. " +
+        "Available countries: USA, CHN, DEU, JPN, GBR, FRA, IND, ITA, CAN, KOR, BRA, AUS, MEX, NLD, CHE, SGP, ARE, SAU, IDN, TUR, ZAF, RUS, NGA, SWE, NOR, POL, ESP, THA, VNM, MYS.",
+      category: "research",
+      riskLevel: "safe",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["trade", "countries"],
+            description: "trade=get trade data, countries=list available country codes",
+          },
+          reporter: { type: "string", description: "ISO3 code of reporting country e.g. 'USA' (for mode=trade)" },
+          partners: {
+            type: "array",
+            items: { type: "string" },
+            description: "ISO3 codes of partner countries e.g. ['CHN','DEU']. Omit for world total.",
+          },
+          flow: {
+            type: "string",
+            enum: ["X", "M", "X,M"],
+            description: "X=exports, M=imports, X,M=both (default)",
+          },
+          year: { type: "number", description: "Year (default 2022)" },
+        },
+        required: ["mode"],
+      },
+      execute: async (args, _ctx) => {
+        const mode = args.mode as string;
+
+        if (mode === "countries") {
+          return `Available countries for Comtrade queries:\n${ComtradeClient.listCountries()}`;
+        }
+
+        if (mode === "trade") {
+          const reporter = args.reporter as string;
+          if (!reporter) return "Provide 'reporter' ISO3 code (e.g. 'USA'). Use mode='countries' to see available codes.";
+          const partners = (args.partners as string[]) || [];
+          const flow = (args.flow as string) || "X,M";
+          const year = (args.year as number) || 2022;
+
+          const records = await comtradeClient.getTradeData(reporter, partners, flow, year);
+          if (records.length === 0) return `No trade data found for ${reporter} in ${year}. Check country code.`;
+
+          const lines: string[] = [`UN Comtrade: ${reporter} trade data (${year})`, ""];
+          for (const r of records) {
+            lines.push(`${r.reporter} ${r.flow} → ${r.partner}: ${ComtradeClient.formatValue(r.primaryValue)}`);
+          }
+          return lines.join("\n");
+        }
+
+        return "Invalid mode. Use 'trade' or 'countries'.";
+      },
+    },
+
+    // ── Data: Eurostat ──
+    {
+      name: "query_eurostat",
+      description:
+        "Query Eurostat — EU economic, trade, and digital economy statistics. " +
+        "Use mode='list' to see curated datasets (GDP, inflation, FDI, ICT, e-commerce, unemployment). " +
+        "Use mode='data' with a dataset_key and EU country codes. " +
+        "FREE — no cost. Essential for EU-specific evidence, GDPR impact analysis, digital economy research.",
+      category: "research",
+      riskLevel: "safe",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["list", "data"],
+            description: "list=show datasets, data=get values",
+          },
+          dataset_key: { type: "string", description: "Dataset key from list (e.g. 'gdp', 'inflation', 'ict_enterprises')" },
+          countries: {
+            type: "array",
+            items: { type: "string" },
+            description: "Eurostat geo codes e.g. ['DE','FR','NL','SE']. Omit for top 8 EU economies.",
+          },
+          start_year: { type: "number", description: "Start year (default 2018)" },
+          end_year: { type: "number", description: "End year (default 2023)" },
+        },
+        required: ["mode"],
+      },
+      execute: async (args, _ctx) => {
+        const mode = args.mode as string;
+
+        if (mode === "list") {
+          const datasets = eurostatClient.listDatasets();
+          const lines = datasets.map((ds, i) => `[${i + 1}] ${ds.id} — ${ds.name}\n    ${ds.description}`);
+          return `Eurostat curated datasets:\n\n${lines.join("\n\n")}\n\nUse mode='data' with dataset_key. Country codes: DE, FR, IT, ES, NL, SE, PL, IE, AT, BE, etc.`;
+        }
+
+        if (mode === "data") {
+          const key = args.dataset_key as string;
+          if (!key) return "Provide 'dataset_key'. Use mode='list' to see options.";
+          const countries = (args.countries as string[]) || [];
+          const startYear = (args.start_year as number) || 2018;
+          const endYear = (args.end_year as number) || 2023;
+
+          const data = await eurostatClient.getData(key, countries, startYear, endYear);
+          if (data.length === 0) return `No Eurostat data for '${key}'. Check the dataset key or try different countries.`;
+
+          // Group by country
+          const byCountry = new Map<string, any[]>();
+          for (const d of data) {
+            const existing = byCountry.get(d.countryCode) || [];
+            existing.push(d);
+            byCountry.set(d.countryCode, existing);
+          }
+
+          const lines: string[] = [`Eurostat: ${key} (${data.length} data points)`, ""];
+          for (const [code, points] of byCountry) {
+            const sorted = points.sort((a: any, b: any) => a.year.localeCompare(b.year));
+            const vals = sorted.map((p: any) => `${p.year}:${typeof p.value === "number" ? p.value.toFixed(1) : "N/A"}`).join(", ");
+            lines.push(`${sorted[0].country} (${code}): ${vals}`);
+          }
+          return lines.join("\n");
+        }
+
+        return "Invalid mode. Use 'list' or 'data'.";
+      },
+    },
+
+    // ── Data: Country Metadata ──
+    {
+      name: "query_countries",
+      description:
+        "Get country metadata from REST Countries API — population, region, languages, currencies, Gini index, borders. " +
+        "Use mode='info' with country codes for specific countries. " +
+        "Use mode='region' to list all countries in a region (Africa, Americas, Asia, Europe, Oceania). " +
+        "FREE — useful for cross-referencing and contextualizing economic data.",
+      category: "research",
+      riskLevel: "safe",
+      parameters: {
+        type: "object",
+        properties: {
+          mode: {
+            type: "string",
+            enum: ["info", "region"],
+            description: "info=specific countries, region=all countries in a region",
+          },
+          countries: {
+            type: "array",
+            items: { type: "string" },
+            description: "ISO2 or ISO3 codes (for mode=info)",
+          },
+          region: { type: "string", description: "Region name: Africa, Americas, Asia, Europe, Oceania (for mode=region)" },
+        },
+        required: ["mode"],
+      },
+      execute: async (args, _ctx) => {
+        const mode = args.mode as string;
+
+        if (mode === "info") {
+          const codes = args.countries as string[];
+          if (!codes || codes.length === 0) return "Provide 'countries' array with ISO codes.";
+          const data = await restCountries.getCountries(codes);
+          if (data.length === 0) return "No country data found. Check codes.";
+          const lines = data.map(c => [
+            `${c.name} (${c.iso3})`,
+            `  Region: ${c.region} / ${c.subregion}`,
+            `  Population: ${c.population.toLocaleString()}`,
+            `  Capital: ${c.capital}`,
+            `  Languages: ${c.languages.join(", ")}`,
+            `  Currencies: ${c.currencies.join(", ")}`,
+            `  Gini: ${Object.entries(c.gini).map(([y, v]) => `${v} (${y})`).join(", ") || "N/A"}`,
+            `  Borders: ${c.borders.join(", ") || "None (island/isolated)"}`,
+          ].join("\n"));
+          return lines.join("\n\n");
+        }
+
+        if (mode === "region") {
+          const region = args.region as string;
+          if (!region) return "Provide 'region': Africa, Americas, Asia, Europe, or Oceania.";
+          const data = await restCountries.getByRegion(region);
+          if (data.length === 0) return `No countries found for region '${region}'.`;
+          const lines = data.slice(0, 30).map(c =>
+            `${c.iso3} ${c.name} — pop: ${(c.population / 1e6).toFixed(1)}M | ${c.subregion}`
+          );
+          return `${region}: ${data.length} countries (top 30 by population):\n${lines.join("\n")}`;
+        }
+
+        return "Invalid mode. Use 'info' or 'region'.";
       },
     },
   ];

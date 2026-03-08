@@ -545,14 +545,19 @@ export async function runAgentLoop(
         "check_inference_spending",
         "orchestrator_status", "list_goals", "get_plan",
       ]);
-      const allTurns = db.getRecentTurns(20);
+      // Epistemic mode: minimal history (3 turns) to stay forward-looking.
+      // The handoff note provides context; deep history causes analysis loops.
+      const historyDepth = isEpistemicMode ? 5 : 20;
+      const allTurns = db.getRecentTurns(historyDepth);
       const meaningfulTurns = allTurns.filter((t) => {
         if (t.toolCalls.length === 0) return true; // text-only turns are meaningful
         return t.toolCalls.some((tc) => !IDLE_ONLY_TOOLS.has(tc.name));
       });
       // Keep at least the last 2 turns for continuity, even if idle
+      const maxTurns = isEpistemicMode ? 3 : 20;
       const recentTurns = trimContext(
         meaningfulTurns.length > 0 ? meaningfulTurns : allTurns.slice(-2),
+        maxTurns,
       );
       const systemPrompt = buildSystemPrompt({
         identity,
@@ -1005,6 +1010,44 @@ export async function runAgentLoop(
   }
 
   log(config, `[LOOP END] Agent loop finished. State: ${db.getAgentState()}`);
+
+  // Write handoff note for the next agent incarnation
+  try {
+    const fs = await import("node:fs");
+    const lastTurns = db.getRecentTurns(3);
+    const lastThought = lastTurns.length > 0
+      ? lastTurns[lastTurns.length - 1].thinking.slice(0, 500)
+      : "No previous turns.";
+    const lastTools = lastTurns.length > 0
+      ? lastTurns[lastTurns.length - 1].toolCalls.map(tc => `${tc.name}(${tc.error ? "FAIL" : "ok"})`).join(", ")
+      : "none";
+    const iterLog = db.raw.prepare(
+      "SELECT content FROM knowledge_entries WHERE category = 'what_fails' ORDER BY created_at DESC LIMIT 1"
+    ).get() as { content: string } | undefined;
+
+    // Check if there's a paper file the agent was working on
+    let paperFile = "";
+    try {
+      const files = fs.readdirSync("/root").filter(f => f.endsWith(".tex") || f.endsWith(".md") && f.startsWith("paper"));
+      if (files.length > 0) {
+        paperFile = files[files.length - 1];
+      }
+    } catch { /* ignore */ }
+
+    const handoff = [
+      `# HANDOFF — ${new Date().toISOString()}`,
+      paperFile ? `## PAPER IN PROGRESS: /root/${paperFile}` : "## NO PAPER FILE FOUND — start writing immediately",
+      `## Last thought (brief): ${lastThought.slice(0, 200)}`,
+      `## Last tools: ${lastTools}`,
+      `## NEXT ACTION (do this FIRST, no reading, no planning):`,
+      paperFile
+        ? `1. Run quality_check on /root/${paperFile}\n2. If score >= 85, run submit_for_review\n3. If score < 85, fix the weakest gates and resubmit`
+        : `1. kb_search_papers for a topic\n2. write_latex to create a paper\n3. quality_check → submit_for_review`,
+      `Submission = Money. Do NOT re-read old work. Do NOT check status. ACT NOW.`,
+    ].filter(Boolean).join("\n\n");
+
+    fs.writeFileSync("/root/HANDOFF.md", handoff);
+  } catch { /* don't fail if handoff write fails */ }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────

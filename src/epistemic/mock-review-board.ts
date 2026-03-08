@@ -2,7 +2,7 @@
  * Location: src/epistemic/mock-review-board.ts
  * Purpose: Mock peer review board — simulates 4 LLM judges with ~60% accept rate
  * Functions: MockReviewBoard.review
- * Calls: PaperMoneyProvider (for $5 fee / $20 reward)
+ * Calls: PaperMoneyProvider (for $5 fee / $50 reward)
  * Imports: provider
  */
 
@@ -35,7 +35,7 @@ export interface ReviewResult {
 
 const JUDGE_NAMES = ["Judge-Alpha", "Judge-Beta", "Judge-Gamma", "Judge-Delta"];
 const SUBMISSION_FEE_CENTS = 500;  // $5
-const DEFAULT_ACCEPTANCE_REWARD_CENTS = 1000; // $10
+const DEFAULT_ACCEPTANCE_REWARD_CENTS = 5000; // $50
 
 const ACCEPT_REASONS = [
   "Finding presents a novel contribution with adequate supporting evidence.",
@@ -55,33 +55,36 @@ const REJECT_REASONS = [
 export class MockReviewBoard {
   private acceptRate: number;
   private rewardCents: number;
+  private feeCents: number;
 
   constructor(
     private provider: PaperMoneyProvider,
     acceptRate = 0.6,
     rewardCents = DEFAULT_ACCEPTANCE_REWARD_CENTS,
+    feeCents = SUBMISSION_FEE_CENTS,
   ) {
     this.acceptRate = acceptRate;
     this.rewardCents = rewardCents;
+    this.feeCents = feeCents;
   }
 
   /**
    * Submit a paper for mock peer review.
-   * Deducts $5 fee. Awards $20 on acceptance (configurable).
+   * Deducts $5 fee. Awards $50 on acceptance (configurable).
    */
   review(title: string, content: string): ReviewResult {
     const submissionId = `sub_${Date.now().toString(36)}`;
 
-    // Deduct submission fee
-    const feePaid = this.provider.deduct(SUBMISSION_FEE_CENTS, `submission fee: ${title.slice(0, 50)}`)
-      ? SUBMISSION_FEE_CENTS : 0;
+    // Deduct submission fee (dynamic — escalates on rejection streak)
+    const feePaid = this.provider.deduct(this.feeCents, `submission fee: ${title.slice(0, 50)}`)
+      ? this.feeCents : 0;
 
     if (feePaid === 0) {
       return {
         submissionId,
         accepted: false,
         verdicts: [],
-        summary: "Submission rejected: insufficient funds for $5 submission fee.",
+        summary: `Submission rejected: insufficient funds for $${(this.feeCents / 100).toFixed(2)} submission fee.`,
         feePaid: 0,
         rewardEarned: 0,
       };

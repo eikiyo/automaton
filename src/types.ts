@@ -613,7 +613,7 @@ export const DEFAULT_EPISTEMIC_CONFIG: EpistemicConfig = {
   researchDomain: "any",
   paperMoneyBalanceCents: 10000,  // $100
   submissionFeeCents: 500,        // $5
-  acceptanceRewardCents: 2000,    // $20
+  acceptanceRewardCents: 5000,    // $50
   bootstrapECS: 100,
   ecsDecayFactor: 0.95,
   mockReviewAcceptRate: 0.6,

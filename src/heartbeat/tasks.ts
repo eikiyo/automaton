@@ -751,7 +751,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
 
   // === Epistemic Mode: Survival Cost ($0.10/min) ===
   survival_cost: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
-    // Runs every tick (60s) — deducts 10 cents per minute regardless of agent state
+    // Runs every tick (60s) — deducts 10 cents per minute, 3x if idle > 5h
     const runtimeMode = taskCtx.config.epistemicConfig?.runtimeMode;
     if (runtimeMode !== "epistemic") return { shouldWake: false };
 
@@ -762,17 +762,35 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
         taskCtx.config.epistemicConfig!.paperMoneyBalanceCents,
         taskCtx.config.epistemicConfig!.ecsDecayFactor,
       );
-      const SURVIVAL_COST_CENTS = 10; // $0.10 per minute
+
+      // Idle penalty: 3x survival cost if no submission in 5 hours
+      const BASE_COST_CENTS = 10; // $0.10 per minute
+      const IDLE_THRESHOLD_MS = 5 * 60 * 60 * 1000; // 5 hours
+      const lastSubmitRow = taskCtx.db.raw.prepare("SELECT value FROM kv WHERE key = 'last_submission_time'").get() as any;
+      const lastSubmitTime = lastSubmitRow ? new Date(lastSubmitRow.value).getTime() : Date.now();
+      const idleMs = Date.now() - lastSubmitTime;
+      const isIdle = idleMs > IDLE_THRESHOLD_MS;
+      const multiplier = isIdle ? 3 : 1;
+      const cost = BASE_COST_CENTS * multiplier;
+      const costLabel = isIdle
+        ? `survival cost 3x IDLE PENALTY ($${(cost / 100).toFixed(2)}/min — no submission in ${Math.round(idleMs / 3600000)}h)`
+        : "survival cost ($0.10/min)";
+
       const balance = provider.getBalance();
       if (balance <= 0) {
         logger.warn(`survival_cost: balance is $0. Agent is dead.`);
         return { shouldWake: true, message: "BALANCE IS $0. You are dead. No money left." };
       }
-      provider.deduct(SURVIVAL_COST_CENTS, "survival cost ($0.10/min)");
+      provider.deduct(cost, costLabel);
       const newBalance = provider.getBalance();
+
+      if (isIdle) {
+        logger.warn(`survival_cost: IDLE PENALTY active. ${costLabel}. Balance: $${(newBalance / 100).toFixed(2)}`);
+      }
+
       if (newBalance <= 500) { // $5 warning
         logger.warn(`survival_cost: balance critically low: $${(newBalance / 100).toFixed(2)}`);
-        return { shouldWake: true, message: `CRITICAL: Balance is $${(newBalance / 100).toFixed(2)}. Survival costs $0.10/min. Submit a paper NOW or you will die.` };
+        return { shouldWake: true, message: `CRITICAL: Balance is $${(newBalance / 100).toFixed(2)}. ${isIdle ? "IDLE PENALTY: 3x survival cost ($0.30/min)! SUBMIT NOW!" : "Survival costs $0.10/min. Submit a paper NOW or you will die."}` };
       }
       return { shouldWake: false };
     } catch (error) {
@@ -895,6 +913,17 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
         logger.warn(`knowledge_node_push failed: ${resp.status} ${resp.statusText}`);
       } else {
         logger.info(`knowledge_node_push: pushed ${knowledgeRows.length} entries, ${recentTurns.length} turns`);
+      }
+
+      // Inject goal reminder every 5 pushes (~2.5 min) to keep agent focused
+      const pushCount = parseInt(db.getKV("kn_push_count") || "0", 10) + 1;
+      db.setKV("kn_push_count", String(pushCount));
+      if (pushCount % 5 === 0) {
+        const balance = (paperMoney / 100).toFixed(2);
+        return {
+          shouldWake: true,
+          message: `REMINDER: Submission = Money. Your balance is $${balance}. Stop reading, stop analyzing, stop planning. WRITE the paper and SUBMIT it via submit_for_review. Every minute without a submission costs $0.10. ACT NOW.`,
+        };
       }
     } catch (error) {
       logger.error("knowledge_node_push failed", error instanceof Error ? error : undefined);
