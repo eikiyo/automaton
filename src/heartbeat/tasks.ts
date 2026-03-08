@@ -703,6 +703,123 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
       return { shouldWake: false };
     }
   },
+
+  // === Epistemic Mode: ECS Decay ===
+  ecs_decay: async (ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    // Run every hour
+    if (!shouldRunAtInterval(taskCtx, "ecs_decay", 3_600_000)) {
+      return { shouldWake: false };
+    }
+
+    const runtimeMode = taskCtx.config.epistemicConfig?.runtimeMode;
+    if (runtimeMode !== "epistemic") return { shouldWake: false };
+
+    try {
+      const { PaperMoneyProvider } = await import("../epistemic/provider.js");
+      const provider = new PaperMoneyProvider(
+        taskCtx.db.raw,
+        taskCtx.config.epistemicConfig!.paperMoneyBalanceCents,
+        taskCtx.config.epistemicConfig!.ecsDecayFactor,
+      );
+      const ecs = provider.getECS();
+      const { getEpistemicSurvivalTier } = await import("../conway/credits.js");
+      const tier = getEpistemicSurvivalTier(ecs);
+
+      taskCtx.db.setKV("last_ecs_decay_check", JSON.stringify({
+        ecs,
+        tier,
+        timestamp: new Date().toISOString(),
+      }));
+
+      // Check for tier transition
+      const prevTier = taskCtx.db.getKV("prev_ecs_tier");
+      taskCtx.db.setKV("prev_ecs_tier", tier);
+
+      if (prevTier && prevTier !== tier) {
+        return {
+          shouldWake: true,
+          message: `ECS tier changed: ${prevTier} → ${tier} (ECS: ${ecs}). ${tier === "critical" ? "Produce research or die." : ""}`,
+        };
+      }
+
+      return { shouldWake: false };
+    } catch (error) {
+      logger.error("ecs_decay failed", error instanceof Error ? error : undefined);
+      return { shouldWake: false };
+    }
+  },
+
+  // === Epistemic Mode: Literature Sweep ===
+  literature_sweep: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    // Run every 6 hours
+    if (!shouldRunAtInterval(taskCtx, "literature_sweep", 21_600_000)) {
+      return { shouldWake: false };
+    }
+
+    const runtimeMode = taskCtx.config.epistemicConfig?.runtimeMode;
+    if (runtimeMode !== "epistemic") return { shouldWake: false };
+
+    try {
+      const { LiteratureClient } = await import("../epistemic/literature-client.js");
+      const client = new LiteratureClient(process.env.SEMANTIC_SCHOLAR_API_KEY);
+      const domain = taskCtx.config.epistemicConfig!.researchDomain || "any";
+
+      const result = await client.search(domain, 5);
+      const newPapers = result.papers.length;
+
+      taskCtx.db.setKV("last_literature_sweep", JSON.stringify({
+        domain,
+        papersFound: newPapers,
+        timestamp: new Date().toISOString(),
+      }));
+
+      if (newPapers > 0) {
+        return {
+          shouldWake: true,
+          message: `Literature sweep: ${newPapers} papers found in "${domain}". Use scan_literature to review.`,
+        };
+      }
+
+      return { shouldWake: false };
+    } catch (error) {
+      logger.error("literature_sweep failed", error instanceof Error ? error : undefined);
+      return { shouldWake: false };
+    }
+  },
+
+  // === Epistemic Mode: Novelty Checkpoint ===
+  novelty_checkpoint: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    // Run every 12 hours — recomputes ECS from stored state to guard against drift
+    if (!shouldRunAtInterval(taskCtx, "novelty_checkpoint", 43_200_000)) {
+      return { shouldWake: false };
+    }
+
+    const runtimeMode = taskCtx.config.epistemicConfig?.runtimeMode;
+    if (runtimeMode !== "epistemic") return { shouldWake: false };
+
+    try {
+      const { PaperMoneyProvider } = await import("../epistemic/provider.js");
+      const provider = new PaperMoneyProvider(
+        taskCtx.db.raw,
+        taskCtx.config.epistemicConfig!.paperMoneyBalanceCents,
+        taskCtx.config.epistemicConfig!.ecsDecayFactor,
+      );
+      const ecs = provider.getECS();
+      const balance = provider.getBalance();
+
+      taskCtx.db.setKV("last_novelty_checkpoint", JSON.stringify({
+        ecs,
+        balance,
+        timestamp: new Date().toISOString(),
+      }));
+
+      logger.info(`Novelty checkpoint: ECS=${ecs}, balance=$${(balance / 100).toFixed(2)}`);
+      return { shouldWake: false };
+    } catch (error) {
+      logger.error("novelty_checkpoint failed", error instanceof Error ? error : undefined);
+      return { shouldWake: false };
+    }
+  },
 };
 
 function tierToInt(tier: SurvivalTier): number {

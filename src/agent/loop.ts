@@ -109,7 +109,12 @@ export async function runAgentLoop(
 
   const builtinTools = createBuiltinTools(identity.sandboxId);
   const installedTools = loadInstalledTools(db);
-  const tools = [...builtinTools, ...installedTools];
+  let epistemicTools: import("../types.js").AutomatonTool[] = [];
+  if (isEpistemicMode && config.epistemicConfig) {
+    const { createEpistemicTools } = await import("../epistemic/tools.js");
+    epistemicTools = createEpistemicTools(config.epistemicConfig);
+  }
+  const tools = [...builtinTools, ...installedTools, ...epistemicTools];
   const toolContext: ToolContext = {
     identity,
     config,
